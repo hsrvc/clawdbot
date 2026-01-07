@@ -1,12 +1,12 @@
 diff --git a/dist/providers/google-shared.js b/dist/providers/google-shared.js
-index 7bc0a9f5d6241f191cd607ecb37b3acac8d58267..56866774e47444b5d333961c9b20fce582363124 100644
+index 7bc0a9f..56866774 100644
 --- a/dist/providers/google-shared.js
 +++ b/dist/providers/google-shared.js
 @@ -10,13 +10,27 @@ import { transformMessages } from "./transorm-messages.js";
  export function convertMessages(model, context) {
      const contents = [];
      const transformedMessages = transformMessages(context.messages, model);
-+    
++
 +    /**
 +     * Helper to add content while merging consecutive messages of the same role.
 +     * Gemini/Cloud Code Assist requires strict role alternation (user/model/user/model).
@@ -22,7 +22,7 @@ index 7bc0a9f5d6241f191cd607ecb37b3acac8d58267..56866774e47444b5d333961c9b20fce5
 +            contents.push({ role, parts });
 +        }
 +    }
-+    
++
      for (const msg of transformedMessages) {
          if (msg.role === "user") {
              if (typeof msg.content === "string") {
@@ -201,8 +201,45 @@ index 7bc0a9f5d6241f191cd607ecb37b3acac8d58267..56866774e47444b5d333961c9b20fce5
              })),
          },
      ];
+diff --git a/dist/providers/transorm-messages.js b/dist/providers/transorm-messages.js
+index abcd123..ef45678 100644
+--- a/dist/providers/transorm-messages.js
++++ b/dist/providers/transorm-messages.js
+@@ -36,11 +36,17 @@ export function transformMessages(messages, model) {
+             // Transform message from different provider/model
+             const transformedContent = assistantMsg.content.map((block) => {
+                 if (block.type === "thinking") {
+-                    // Convert thinking block to text block with <thinking> tags
+-                    return {
++                    // For Gemini: skip thinking blocks entirely (causes "corrupted thought signature" errors)
++                    // For other cross-provider: convert to text with <thinking> tags
++                    const isGemini = model.id.toLowerCase().includes("gemini");
++                    if (isGemini) {
++                        return null; // Will be filtered out below
++                    }
++                    return {
+                         type: "text",
+                         text: `<thinking>\n${block.thinking}\n</thinking>`,
+                     };
+                 }
+                 // Normalize tool call IDs for github-copilot cross-API switches
+                 if (block.type === "toolCall" && needsToolCallIdNormalization) {
+@@ -54,10 +60,12 @@ export function transformMessages(messages, model) {
+                 // All other blocks pass through unchanged
+                 return block;
+             });
++            // Filter out null blocks (thinking blocks skipped for Gemini)
++            const filteredContent = transformedContent.filter((block) => block !== null);
+             // Return transformed assistant message
+             return {
+                 ...assistantMsg,
+-                content: transformedContent,
++                content: filteredContent,
+             };
+         }
+         return msg;
 diff --git a/dist/providers/openai-responses.js b/dist/providers/openai-responses.js
-index 20fb0a22aaa28f7ff7c2f44a8b628fa1d9d7d936..31bae0aface1319487ce62d35f1f3b6ed334863e 100644
+index 20fb0a2..31bae0a 100644
 --- a/dist/providers/openai-responses.js
 +++ b/dist/providers/openai-responses.js
 @@ -486,7 +486,6 @@ function convertTools(tools) {

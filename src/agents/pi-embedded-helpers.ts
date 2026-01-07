@@ -172,12 +172,27 @@ function extractSupportedValues(raw: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * Check if the error message indicates a corrupted thought signature error.
+ * This is a known issue with Gemini models when thinking mode is enabled.
+ */
+export function isCorruptedThoughtError(message?: string): boolean {
+  if (!message) return false;
+  return message.toLowerCase().includes("corrupted thought signature");
+}
+
 export function pickFallbackThinkingLevel(params: {
   message?: string;
   attempted: Set<ThinkLevel>;
 }): ThinkLevel | undefined {
   const raw = params.message?.trim();
   if (!raw) return undefined;
+
+  // Handle Gemini's corrupted thought signature error by disabling thinking
+  if (isCorruptedThoughtError(raw) && !params.attempted.has("off")) {
+    return "off";
+  }
+
   const supported = extractSupportedValues(raw);
   if (supported.length === 0) return undefined;
   for (const entry of supported) {

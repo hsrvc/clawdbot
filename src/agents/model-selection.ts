@@ -164,6 +164,14 @@ export function buildAllowedModelSet(params: {
   return { allowAny: false, allowedCatalog, allowedKeys };
 }
 
+/**
+ * Check if this is a Gemini model. Gemini models have known issues with
+ * thinking mode ("Corrupted thought signature" errors).
+ */
+function isGeminiModel(model: string): boolean {
+  return model.toLowerCase().includes("gemini");
+}
+
 export function resolveThinkingDefault(params: {
   cfg: ClawdbotConfig;
   provider: string;
@@ -172,6 +180,14 @@ export function resolveThinkingDefault(params: {
 }): ThinkLevel {
   const configured = params.cfg.agent?.thinkingDefault;
   if (configured) return configured;
+
+  // Gemini models have known issues with thinking mode ("Corrupted thought
+  // signature" errors), so disable thinking by default unless explicitly
+  // configured.
+  if (isGeminiModel(params.model)) {
+    return "off";
+  }
+
   const candidate = params.catalog?.find(
     (entry) => entry.provider === params.provider && entry.id === params.model,
   );

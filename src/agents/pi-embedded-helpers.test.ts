@@ -2,6 +2,7 @@ import type { AssistantMessage } from "@mariozechner/pi-ai";
 import { describe, expect, it } from "vitest";
 import type { ThinkLevel } from "../auto-reply/thinking.js";
 import {
+  isCorruptedThoughtError,
   isRateLimitAssistantError,
   pickFallbackThinkingLevel,
 } from "./pi-embedded-helpers.js";
@@ -46,6 +47,29 @@ describe("isRateLimitAssistantError", () => {
   });
 });
 
+describe("isCorruptedThoughtError", () => {
+  it("detects corrupted thought signature errors", () => {
+    expect(
+      isCorruptedThoughtError("Corrupted thought signature detected"),
+    ).toBe(true);
+  });
+
+  it("detects case-insensitive corrupted thought signature", () => {
+    expect(
+      isCorruptedThoughtError("CORRUPTED THOUGHT SIGNATURE in response"),
+    ).toBe(true);
+  });
+
+  it("returns false for unrelated errors", () => {
+    expect(isCorruptedThoughtError("Rate limit exceeded")).toBe(false);
+  });
+
+  it("returns false for undefined/empty messages", () => {
+    expect(isCorruptedThoughtError(undefined)).toBe(false);
+    expect(isCorruptedThoughtError("")).toBe(false);
+  });
+});
+
 describe("pickFallbackThinkingLevel", () => {
   it("selects the first supported thinking level", () => {
     const attempted = new Set<ThinkLevel>(["low"]);
@@ -70,6 +94,24 @@ describe("pickFallbackThinkingLevel", () => {
     const attempted = new Set<ThinkLevel>(["low"]);
     const next = pickFallbackThinkingLevel({
       message: "Request failed.",
+      attempted,
+    });
+    expect(next).toBeUndefined();
+  });
+
+  it("returns 'off' for corrupted thought signature errors", () => {
+    const attempted = new Set<ThinkLevel>(["low"]);
+    const next = pickFallbackThinkingLevel({
+      message: "Error: Corrupted thought signature detected in Gemini response",
+      attempted,
+    });
+    expect(next).toBe("off");
+  });
+
+  it("returns undefined for corrupted thought if 'off' already attempted", () => {
+    const attempted = new Set<ThinkLevel>(["low", "off"]);
+    const next = pickFallbackThinkingLevel({
+      message: "Corrupted thought signature",
       attempted,
     });
     expect(next).toBeUndefined();
