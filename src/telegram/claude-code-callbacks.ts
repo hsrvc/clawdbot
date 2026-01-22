@@ -19,7 +19,9 @@ import {
   getBubbleByTokenPrefix,
   resumeSession,
   CLEAR_MARKUP,
+  buildPlanningRequest,
 } from "../agents/claude-code/index.js";
+import { setForcedResumeToken } from "../agents/tools/claude-code-start-tool.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 
 const log = createSubsystemLogger("telegram/claude-callbacks");
@@ -125,6 +127,7 @@ export async function handleClaudeCodeCallback(
       const bubbleInfo = getBubbleByTokenPrefix(tokenPrefix);
       if (bubbleInfo) {
         const { bubble } = bubbleInfo;
+        const threadId = bubble.threadId;
         log.info(`Resuming session from bubble: ${bubble.resumeToken} in ${bubble.workingDir}`);
 
         // Acknowledge immediately
@@ -132,28 +135,60 @@ export async function handleClaudeCodeCallback(
           text: "Resuming session...",
         });
 
-        // Start a new session with --resume
+        // Import bubble service for live updates
+        const { createSessionBubble, updateSessionBubble } =
+          await import("../agents/claude-code/bubble-service.js");
+
+        let newSessionId: string | undefined;
+
+        // Start a new session with --resume and callbacks for live updates
         const result = await startSession({
           workingDir: bubble.workingDir,
           resumeToken: bubble.resumeToken,
           prompt: "continue",
           permissionMode: "bypassPermissions",
+          onStateChange: async (state) => {
+            if (!newSessionId) return;
+            await updateSessionBubble({ sessionId: newSessionId, state });
+          },
         });
 
         if (result.success) {
-          // Send confirmation message
-          if (chatId) {
-            await api
-              .sendMessage(chatId, `Resumed session for **${bubble.projectName}**`, {
-                parse_mode: "Markdown",
-              })
-              .catch(() => {});
+          newSessionId = result.sessionId;
+
+          // Create live bubble for the resumed session
+          if (chatId && result.sessionId && result.resumeToken) {
+            const initialState = {
+              status: "running" as const,
+              projectName: bubble.projectName,
+              resumeToken: result.resumeToken,
+              runtimeStr: "0m",
+              runtimeSeconds: 0,
+              phaseStatus: "",
+              branch: "",
+              recentActions: [],
+              hasQuestion: false,
+              questionText: "",
+              totalEvents: 0,
+              isIdle: false,
+            };
+
+            await createSessionBubble({
+              sessionId: result.sessionId,
+              chatId: String(chatId),
+              threadId,
+              resumeToken: result.resumeToken,
+              state: initialState,
+              workingDir: bubble.workingDir,
+              dydoCommand: "Continue work",
+            });
           }
         } else {
           if (chatId) {
             await api
               .sendMessage(chatId, `Failed to resume: ${result.error}`, {
                 parse_mode: "Markdown",
+                ...(threadId && { message_thread_id: threadId }),
               })
               .catch(() => {});
           }
@@ -185,45 +220,63 @@ export function isClaudeCodeCallback(data: string): boolean {
 }
 
 /**
+ * Result of handling a bubble reply.
+ */
+export type HandleBubbleReplyResult =
+  | { type: "not_bubble_reply" }
+  | { type: "handled_directly" } // e.g., sent input to running session
+  | { type: "route_to_dydo"; orchestrationText: string }; // Let DyDo orchestrate
+
+/**
  * Handle a reply to a Claude Code bubble message.
  *
- * When user replies to a bubble with text, it's treated as new instructions:
- * - If session is running: send the text as input
- * - If session exited: resume with the text as prompt
+ * When user replies to a bubble with text:
+ * - If session is running: send the text as input directly (handled_directly)
+ * - If session exited: route through DyDo for orchestration (route_to_dydo)
  *
- * Returns true if handled, false if not a bubble reply.
+ * DyDo will enrich the prompt with project context before starting Claude Code.
  */
 export async function handleBubbleReply(params: {
   chatId: number | string;
   replyToMessageId: number;
   text: string;
   api: Bot["api"];
+  /** Thread/topic ID - messages should stay in the same topic */
+  threadId?: number;
   /** Original message text for fallback resume token extraction */
   originalMessageText?: string;
-}): Promise<boolean> {
-  const { chatId, replyToMessageId, text, api, originalMessageText } = params;
+}): Promise<HandleBubbleReplyResult> {
+  const { chatId, replyToMessageId, text, api, threadId, originalMessageText } = params;
 
   // Check if this is a reply to a bubble (in-memory lookup)
   const {
     isReplyToBubble,
     sendInput: sendSessionInput,
     getSession,
-    startSession: startNewSession,
     logDyDoCommand,
     resolveProject,
   } = await import("../agents/claude-code/index.js");
 
   const bubbleInfo = isReplyToBubble(chatId, replyToMessageId);
+  log.info(
+    `[BUBBLE REPLY] isReplyToBubble returned: ${bubbleInfo ? `sessionId=${bubbleInfo.sessionId}, token=${bubbleInfo.bubble.resumeToken.slice(0, 8)}...` : "null"}`,
+  );
 
   // If not found in memory, try to extract from message text
   if (!bubbleInfo) {
     // Try fallback: parse resume token from original message text
+    log.info(
+      `[BUBBLE REPLY] Fallback: parsing from message text (${originalMessageText?.length ?? 0} chars)`,
+    );
     const fallbackInfo = parseResumeTokenFromMessage(originalMessageText);
     if (!fallbackInfo) {
-      return false; // Not a bubble reply
+      log.info(`[BUBBLE REPLY] Fallback parsing failed - not a bubble reply`);
+      return { type: "not_bubble_reply" };
     }
 
-    log.info(`Handling bubble reply via fallback parsing: ${fallbackInfo.resumeToken}`);
+    log.info(
+      `[BUBBLE REPLY] Fallback parsed: token=${fallbackInfo.resumeToken}, project=${fallbackInfo.projectName}`,
+    );
 
     // Log the new instruction
     logDyDoCommand({
@@ -233,34 +286,42 @@ export async function handleBubbleReply(params: {
       project: fallbackInfo.projectName,
     });
 
-    // Resolve project to get working directory
+    // Resolve project to get working directory (for worktree info)
     const resolved = await resolveProject(fallbackInfo.projectName);
     if (!resolved) {
       log.warn(`Could not resolve project: ${fallbackInfo.projectName}`);
       await api
         .sendMessage(chatId, `Could not find project: ${fallbackInfo.projectName}`, {
           parse_mode: "Markdown",
+          ...(threadId && { message_thread_id: threadId }),
         })
         .catch(() => {});
-      return true; // We handled it, just couldn't resume
+      return { type: "handled_directly" }; // Error handled
     }
 
-    // Resume with the extracted info
-    await resumeWithNewInstructions(
-      {
-        resumeToken: fallbackInfo.resumeToken,
-        workingDir: resolved.workingDir,
-        projectName: fallbackInfo.projectName,
+    // Route through DyDo for orchestration (enrich prompt with project context)
+    // Set forced resume token to ensure code-level enforcement (keyed by chatId)
+    setForcedResumeToken(fallbackInfo.resumeToken, String(chatId));
+
+    const orchestrationText = buildPlanningRequest({
+      action: "resume",
+      project: fallbackInfo.projectName,
+      task: text,
+      resumeToken: fallbackInfo.resumeToken,
+      chatContext: {
+        chatId: String(chatId),
+        threadId,
       },
-      text,
-      chatId,
-      api,
-    );
-    return true;
+    });
+
+    return { type: "route_to_dydo", orchestrationText };
   }
 
   const { sessionId, bubble } = bubbleInfo;
-  log.info(`Handling bubble reply for session ${sessionId}: ${text.slice(0, 50)}...`);
+  log.info(
+    `[BUBBLE REPLY] Found in memory: sessionId=${sessionId}, token=${bubble.resumeToken.slice(0, 8)}..., project=${bubble.projectName}`,
+  );
+  log.info(`[BUBBLE REPLY] User message: ${text.slice(0, 50)}...`);
 
   // Log the new instruction as a DyDo command (for bubble display)
   logDyDoCommand({
@@ -274,31 +335,42 @@ export async function handleBubbleReply(params: {
   const session = getSession(sessionId);
 
   if (session) {
-    // Session is running - send the text as input
+    // Session is running - send the text as input directly
     const success = sendSessionInput(sessionId, text);
     if (success) {
       log.info(`[${sessionId}] Sent bubble reply as input`);
-      // Send confirmation
+      // Send confirmation (in the same thread/topic)
       await api
         .sendMessage(
           chatId,
           `📨 Sent to Claude Code: "${text.slice(0, 50)}${text.length > 50 ? "..." : ""}"`,
           {
             parse_mode: "Markdown",
+            ...(threadId && { message_thread_id: threadId }),
           },
         )
         .catch(() => {});
-    } else {
-      log.warn(`[${sessionId}] Failed to send bubble reply as input`);
-      // Try to resume instead
-      await resumeWithNewInstructions(bubble, text, chatId, api);
+      return { type: "handled_directly" };
     }
-    return true;
+    log.warn(`[${sessionId}] Failed to send input, will route to DyDo for resume`);
   }
 
-  // Session not running - resume with the text as prompt
-  await resumeWithNewInstructions(bubble, text, chatId, api);
-  return true;
+  // Session not running - route through DyDo for orchestration
+  // Set forced resume token to ensure code-level enforcement (keyed by chatId)
+  setForcedResumeToken(bubble.resumeToken, String(chatId));
+
+  const orchestrationText = buildPlanningRequest({
+    action: "resume",
+    project: bubble.projectName,
+    task: text,
+    resumeToken: bubble.resumeToken,
+    chatContext: {
+      chatId: String(chatId),
+      threadId,
+    },
+  });
+
+  return { type: "route_to_dydo", orchestrationText };
 }
 
 /**
@@ -334,41 +406,4 @@ function parseResumeTokenFromMessage(
   }
 
   return { resumeToken, projectName };
-}
-
-/**
- * Resume a session with new instructions.
- */
-async function resumeWithNewInstructions(
-  bubble: { resumeToken: string; workingDir: string; projectName: string },
-  instructions: string,
-  chatId: number | string,
-  api: Bot["api"],
-): Promise<void> {
-  log.info(`Resuming session with new instructions: ${instructions.slice(0, 50)}...`);
-
-  // Notify user
-  await api
-    .sendMessage(chatId, `Resuming **${bubble.projectName}** with new instructions...`, {
-      parse_mode: "Markdown",
-    })
-    .catch(() => {});
-
-  const result = await startSession({
-    workingDir: bubble.workingDir,
-    resumeToken: bubble.resumeToken,
-    prompt: instructions,
-    permissionMode: "bypassPermissions",
-  });
-
-  if (result.success) {
-    log.info(`Session resumed: ${result.sessionId}`);
-  } else {
-    log.error(`Failed to resume session: ${result.error}`);
-    await api
-      .sendMessage(chatId, `Failed to resume: ${result.error}`, {
-        parse_mode: "Markdown",
-      })
-      .catch(() => {});
-  }
 }

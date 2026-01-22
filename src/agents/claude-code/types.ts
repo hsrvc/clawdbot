@@ -106,7 +106,7 @@ export interface SessionState {
   branch: string;
 
   /** Recent actions for display */
-  recentActions: Array<{ icon: string; description: string }>;
+  recentActions: Array<{ icon: string; description: string; fullText?: string }>;
 
   /** Whether Claude is waiting for user input */
   hasQuestion: boolean;
@@ -170,7 +170,7 @@ export interface ClaudeCodeSessionData {
   events: SessionEvent[];
 
   /** Recent actions buffer */
-  recentActions: Array<{ icon: string; description: string }>;
+  recentActions: Array<{ icon: string; description: string; fullText?: string }>;
 
   /** Current phase status */
   phaseStatus: string;

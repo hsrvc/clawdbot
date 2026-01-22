@@ -323,14 +323,14 @@ export class SessionParser {
 export function extractRecentActions(
   events: SessionEvent[],
   limit: number = 10,
-): Array<{ icon: string; description: string }> {
-  const actions: Array<{ icon: string; description: string }> = [];
+): Array<{ icon: string; description: string; fullText?: string }> {
+  const actions: Array<{ icon: string; description: string; fullText?: string }> = [];
 
   // Get last N events
   const recentEvents = events.slice(-limit * 2); // Get more to filter
 
   for (const event of recentEvents) {
-    let action: { icon: string; description: string } | undefined;
+    let action: { icon: string; description: string; fullText?: string } | undefined;
 
     switch (event.type) {
       case "tool_use":
@@ -352,11 +352,13 @@ export function extractRecentActions(
           action = {
             icon: "❓",
             description: truncate(event.text, 50),
+            fullText: event.text, // Store full text for done state summary
           };
         } else if (event.text) {
           action = {
             icon: "💬",
             description: truncate(event.text, 50),
+            fullText: event.text, // Store full text for done state summary
           };
         }
         break;

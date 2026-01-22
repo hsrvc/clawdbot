@@ -21,15 +21,13 @@ import {
 import {
   createSessionBubble,
   updateSessionBubble,
-  completeSessionBubble,
-  forwardEventToChat,
   recordCCQuestion,
   recordDyDoAnswer,
 } from "../claude-code/bubble-service.js";
 import { generateOrchestratorResponse } from "../claude-code/orchestrator.js";
 import type { OrchestratorContext } from "../claude-code/orchestrator.js";
 import type { ProjectContext } from "../claude-code/project-context.js";
-import type { SessionEvent, SessionState } from "../claude-code/types.js";
+import type { SessionState } from "../claude-code/types.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readStringParam } from "./common.js";
 
@@ -60,6 +58,39 @@ export interface SessionPlanningContext {
  * Used for Q&A routing to give DyDo full context
  */
 const sessionContexts = new Map<string, SessionPlanningContext>();
+
+/**
+ * Forced resume token context, keyed by chatId.
+ * When set, claude_code_start will use this token regardless of what DyDo passes.
+ * This ensures code-level enforcement for bubble reply resume operations.
+ * Using a Map prevents concurrent requests from overwriting each other.
+ */
+const forcedResumeTokens = new Map<string, string>();
+
+/**
+ * Set a forced resume token for a specific chat.
+ * The token will be cleared after claude_code_start uses it.
+ */
+export function setForcedResumeToken(token: string, chatId?: string): void {
+  const key = chatId || "default";
+  log.info(`[FORCED TOKEN] Setting for chat ${key}: ${token.slice(0, 8)}...`);
+  forcedResumeTokens.set(key, token);
+}
+
+/**
+ * Get and clear the forced resume token for a specific chat.
+ */
+function consumeForcedResumeToken(chatId?: string): string | undefined {
+  const key = chatId || "default";
+  const token = forcedResumeTokens.get(key);
+  if (token) {
+    forcedResumeTokens.delete(key);
+    log.info(`[FORCED TOKEN] Consuming for chat ${key}: ${token.slice(0, 8)}...`);
+  } else {
+    log.info(`[FORCED TOKEN] None set for chat ${key} - using DyDo's value`);
+  }
+  return token;
+}
 
 /**
  * Get planning context for a Claude Code session
@@ -130,7 +161,26 @@ The session will run in background. You'll receive questions via conversation.`,
       const prompt = readStringParam(params, "prompt", { required: true });
       const originalTask = readStringParam(params, "originalTask") || prompt;
       const worktree = readStringParam(params, "worktree");
-      const resumeToken = readStringParam(params, "resumeToken");
+
+      // Extract chat context for bubble updates (need chatId early for forced token lookup)
+      const chatId = readStringParam(params, "chatId");
+
+      // Check for forced resume token first (code-level enforcement for bubble replies)
+      // This ensures the correct token is used even if DyDo passes wrong/no token
+      const forcedToken = consumeForcedResumeToken(chatId);
+      const passedToken = readStringParam(params, "resumeToken");
+      const resumeToken = forcedToken || passedToken;
+
+      if (forcedToken && passedToken && forcedToken !== passedToken) {
+        log.warn(
+          `Overriding DyDo's resumeToken (${passedToken?.slice(0, 8)}...) with forced token (${forcedToken.slice(0, 8)}...)`,
+        );
+      }
+
+      log.info(
+        `[RESUME] Final token decision: forced=${forcedToken?.slice(0, 8) || "none"}, passed=${passedToken?.slice(0, 8) || "none"}, using=${resumeToken?.slice(0, 8) || "NEW SESSION"}`,
+      );
+
       const planningDecisions = Array.isArray(params.planningDecisions)
         ? (params.planningDecisions as string[])
         : [];
@@ -138,8 +188,7 @@ The session will run in background. You'll receive questions via conversation.`,
         ? (params.userClarifications as string[])
         : [];
 
-      // Extract chat context for bubble updates
-      const chatId = readStringParam(params, "chatId");
+      // Extract remaining chat context for bubble updates (chatId already extracted above)
       const threadId = typeof params.threadId === "number" ? params.threadId : undefined;
       const accountId = readStringParam(params, "accountId");
 
@@ -147,34 +196,59 @@ The session will run in background. You'll receive questions via conversation.`,
       let projectPath: string | undefined;
       let projectName: string = projectInput; // Default to input
 
-      // Check if it's a path
-      if (projectInput.startsWith("/")) {
-        projectPath = projectInput;
-        projectName = path.basename(projectInput);
-      } else {
-        // Try to resolve as project name
-        const projectSpec = worktree ? `${projectInput} @${worktree}` : projectInput;
-        const resolved = resolveProject(projectSpec);
-
-        if (resolved) {
-          projectPath = resolved.workingDir;
-          // Extract project name from displayName (e.g., "juzi @experimental" -> "juzi")
-          projectName = resolved.displayName.split(" ")[0] || projectInput;
+      // CRITICAL: If resuming, get working directory from the resume token first!
+      // The session file location tells us the exact directory the session was created in.
+      // Using a different directory will cause Claude to create a new session instead.
+      if (resumeToken) {
+        const { getWorkingDirFromResumeToken } = await import("../claude-code/index.js");
+        const tokenWorkingDir = getWorkingDirFromResumeToken(resumeToken);
+        if (tokenWorkingDir) {
+          projectPath = tokenWorkingDir;
+          projectName = path.basename(tokenWorkingDir);
+          // Check for worktree pattern to get better display name
+          const worktreeMatch = tokenWorkingDir.match(/(.+)\/\.worktrees\/([^/]+)$/);
+          if (worktreeMatch) {
+            projectName = `${path.basename(worktreeMatch[1])} @${worktreeMatch[2]}`;
+          }
+          log.info(`[RESUME] Using working dir from token: ${projectPath} (${projectName})`);
         } else {
-          // Try common locations
-          const commonBases = [
-            "/Users/dydo/Documents/agent",
-            "/Users/dydo/clawd/projects",
-            "/Users/dydo",
-          ];
+          log.warn(
+            `[RESUME] Could not find session file for token ${resumeToken.slice(0, 8)}..., falling back to project resolution`,
+          );
+        }
+      }
 
-          for (const base of commonBases) {
-            const candidate = path.join(base, projectInput);
-            const fs = require("node:fs");
-            if (fs.existsSync(candidate)) {
-              projectPath = candidate;
-              projectName = projectInput;
-              break;
+      // Fall back to project resolution if we don't have a path yet
+      if (!projectPath) {
+        // Check if it's a path
+        if (projectInput.startsWith("/")) {
+          projectPath = projectInput;
+          projectName = path.basename(projectInput);
+        } else {
+          // Try to resolve as project name
+          const projectSpec = worktree ? `${projectInput} @${worktree}` : projectInput;
+          const resolved = resolveProject(projectSpec);
+
+          if (resolved) {
+            projectPath = resolved.workingDir;
+            // Extract project name from displayName (e.g., "juzi @experimental" -> "juzi")
+            projectName = resolved.displayName.split(" ")[0] || projectInput;
+          } else {
+            // Try common locations
+            const commonBases = [
+              "/Users/dydo/Documents/agent",
+              "/Users/dydo/clawd/projects",
+              "/Users/dydo",
+            ];
+
+            for (const base of commonBases) {
+              const candidate = path.join(base, projectInput);
+              const fs = require("node:fs");
+              if (fs.existsSync(candidate)) {
+                projectPath = candidate;
+                projectName = projectInput;
+                break;
+              }
             }
           }
         }
@@ -211,8 +285,6 @@ The session will run in background. You'll receive questions via conversation.`,
         // Ignore - project context is optional
       }
 
-      // Track event index for bubble updates
-      let eventIndex = 0;
       let sessionId: string | undefined;
       let currentResumeToken = resumeToken;
 
@@ -223,19 +295,7 @@ The session will run in background. You'll receive questions via conversation.`,
           prompt,
           resumeToken,
           permissionMode: "bypassPermissions",
-
-          // Event handler: forward to chat and update bubble
-          onEvent: async (event: SessionEvent) => {
-            if (!sessionId || !chatId) return;
-            eventIndex++;
-
-            // Forward significant events to chat
-            await forwardEventToChat({
-              sessionId,
-              event,
-              eventIndex,
-            });
-          },
+          // Note: No onEvent handler - events are shown in the bubble via recentActions from onStateChange
 
           // State change handler: update bubble
           onStateChange: async (state: SessionState) => {

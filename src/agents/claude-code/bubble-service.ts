@@ -44,99 +44,101 @@ interface QAState {
 const qaStates = new Map<string, QAState>();
 
 /**
+ * Takopi-style hard break: two spaces + newline.
+ * Creates line breaks without paragraph spacing.
+ */
+const HARD_BREAK = "  \n";
+
+/**
  * Format session state into hybrid bubble message.
  *
  * Takopi-style format:
- * - **working** / **done** header with project and runtime
- * - Summarized actions (last 5-6)
- * - Expanded Q&A when active, collapsed when answered
- * - Footer with context and resume command
+ * - Header: "working · project · 45m" (no bold, uses · separator)
+ * - Body: action lines with status icons (no list markers)
+ * - Footer: ctx and resume lines with hard breaks
+ * - Sections separated by double newline
  */
 function formatHybridBubbleMessage(state: SessionState, sessionId: string): string {
-  const lines: string[] = [];
   const qaState = qaStates.get(sessionId) || { answeredCount: 0 };
 
-  // Header: "**working** · project · 45m" or "**done** · project · 45m"
-  const status = state.isIdle ? "done" : "working";
+  // Header: "working · project · 45m" or "done · project · 45m"
+  // IMPORTANT: "done" should only show when session process has ended
+  const sessionEnded =
+    state.status === "completed" || state.status === "cancelled" || state.status === "failed";
+  const statusLabel = sessionEnded ? "done" : "working";
   const runtime = compactRuntime(state.runtimeStr);
-  lines.push(`**${status}** · ${state.projectName} · ${runtime}`);
-  lines.push("");
+  const header = `${statusLabel} · ${state.projectName} · ${runtime}`;
 
   // Get DyDo's command for this session
   const dydoCommand = state.resumeToken ? getLatestDyDoCommand(state.resumeToken) : undefined;
 
-  if (state.isIdle) {
-    // === DONE STATE ===
-    // Show DyDo's task and last Claude message (summary)
-    if (dydoCommand) {
-      lines.push(`🐶 ${dydoCommand}`);
-      lines.push("");
-    }
+  // Build body lines (no list markers, use hard breaks)
+  const bodyLines: string[] = [];
 
-    // Find last Claude message for summary
+  if (sessionEnded) {
+    // === DONE STATE ===
+    // Don't show DyDo command - focus on the result, not what was asked
+
+    // Find last Claude message for summary (show more text in done state)
     const lastMessage = state.recentActions
       .slice()
       .reverse()
       .find((a) => a.icon === "💬");
     if (lastMessage) {
+      // Use fullText if available (contains complete message), otherwise fall back to description
+      const fullMsg = lastMessage.fullText || lastMessage.description;
+      // Allow up to 2500 chars for the summary in done state
+      // (Telegram limit is 4096, header+footer ~200 chars)
+      const maxSummaryLength = 2500;
       const msg =
-        lastMessage.description.length > 600
-          ? lastMessage.description.slice(0, 597) + "..."
-          : lastMessage.description;
-      lines.push(`💬 ${msg}`);
+        fullMsg.length > maxSummaryLength
+          ? fullMsg.slice(0, maxSummaryLength - 3) + "..."
+          : fullMsg;
+      bodyLines.push(`💬 ${msg}`);
     } else {
-      lines.push("_(session complete)_");
+      bodyLines.push("_(session complete)_");
     }
   } else {
     // === WORKING STATE ===
-    // DyDo's task at top
-    if (dydoCommand) {
-      lines.push(`- 🐶 ${dydoCommand}`);
-    }
-
     // Summarize answered Q&As if any
     if (qaState.answeredCount > 0) {
-      lines.push(
-        `- ✓ DyDo answered ${qaState.answeredCount} question${qaState.answeredCount > 1 ? "s" : ""}`,
+      bodyLines.push(
+        `✓ DyDo answered ${qaState.answeredCount} question${qaState.answeredCount > 1 ? "s" : ""}`,
       );
     }
 
     // Check if Q&A is currently active
     if (qaState.currentQuestion && qaState.dydoThinking) {
-      // === EXPANDED Q&A (active) ===
-      lines.push("");
       const questionPreview =
         qaState.currentQuestion.length > 150
           ? qaState.currentQuestion.slice(0, 147) + "..."
           : qaState.currentQuestion;
-      lines.push(`💬 **CC asking:**`);
-      lines.push(questionPreview);
-      lines.push("");
-      lines.push(`🐶 **DyDo thinking...**`);
-      lines.push("");
+      bodyLines.push(`💬 CC asking: ${questionPreview}`);
+      bodyLines.push(`🐶 DyDo thinking...`);
     }
 
-    // Show recent actions (last 5)
-    const actionsToShow = state.recentActions.slice(-5);
+    // Show recent actions (last 6, no list markers)
+    const actionsToShow = state.recentActions.slice(-6);
     if (actionsToShow.length > 0) {
       for (const action of actionsToShow) {
-        lines.push(`- ${action.icon} ${action.description}`);
+        bodyLines.push(`${action.icon} ${action.description}`);
       }
-    } else if (!dydoCommand && !qaState.currentQuestion) {
-      lines.push("_(waiting for activity...)_");
+    } else if (!qaState.currentQuestion) {
+      bodyLines.push("_(waiting...)_");
     }
   }
 
-  // Footer: context and resume command
-  lines.push("");
-  lines.push("---");
+  // Footer: context and resume command with hard breaks
   const ctxLine = state.projectName.includes("@")
     ? `ctx: ${state.projectName}`
     : `ctx: ${state.projectName} @${state.branch}`;
-  lines.push(ctxLine);
-  lines.push(`\`claude --resume ${state.resumeToken}\``);
+  const resumeLine = `\`claude --resume ${state.resumeToken}\``;
+  const footer = ctxLine + HARD_BREAK + resumeLine;
 
-  return lines.join("\n");
+  // Assemble: header \n\n body \n\n footer
+  const body = bodyLines.length > 0 ? bodyLines.join(HARD_BREAK) : null;
+  const parts = [header, body, footer].filter(Boolean);
+  return parts.join("\n\n");
 }
 
 /**
@@ -278,6 +280,14 @@ function formatEventForForward(event: SessionEvent): string | null {
 
     case "assistant_message":
       if (event.text) {
+        // Skip redundant status messages (bubble already shows this)
+        if (
+          event.text === "Session ended with error" ||
+          event.text === "Session completed" ||
+          event.text.startsWith("Session ended")
+        ) {
+          return null;
+        }
         const truncated = event.text.length > 300 ? event.text.slice(0, 297) + "..." : event.text;
         return `💬 ${truncated}`;
       }
@@ -381,6 +391,7 @@ export async function createSessionBubble(params: {
       accountId,
       messageThreadId: threadId,
       buttons: keyboard,
+      disableLinkPreview: true, // Prevent file names like "progress.md" from showing link previews
     });
 
     const bubble: ActiveBubble = {
@@ -462,6 +473,7 @@ export async function updateSessionBubble(params: {
     await editMessageTelegram(bubble.chatId, bubble.messageId, text, {
       accountId: bubble.accountId,
       buttons: keyboard,
+      disableLinkPreview: true,
     });
 
     // Update tracking state
@@ -499,32 +511,36 @@ export async function completeSessionBubble(params: {
     return false;
   }
 
-  const lines: string[] = [];
-  lines.push(`**Session Complete**`);
-  lines.push("");
-  lines.push(`**Project:** ${state.projectName}`);
-  lines.push(`**Runtime:** ${state.runtimeStr}`);
-  lines.push(`**Events:** ${state.totalEvents.toLocaleString()}`);
+  // Takopi-style: header · project · runtime · step N
+  const runtime = compactRuntime(state.runtimeStr);
+  const header = `done · ${state.projectName} · ${runtime}`;
+
+  // Body: summary of completed work
+  const bodyLines: string[] = [];
+  bodyLines.push(`✓ ${state.totalEvents.toLocaleString()} events`);
 
   if (completedPhases.length > 0) {
-    lines.push("");
-    lines.push("**Phases Completed:**");
     for (const phase of completedPhases) {
-      lines.push(`- ${phase}`);
+      bodyLines.push(`✓ ${phase}`);
     }
   }
 
-  lines.push("");
-  lines.push("---");
-  lines.push(`ctx: ${state.projectName} @${state.branch}`);
-  lines.push(`\`claude --resume ${state.resumeToken}\``);
+  // Footer: context and resume command with hard breaks
+  const ctxLine = state.projectName.includes("@")
+    ? `ctx: ${state.projectName}`
+    : `ctx: ${state.projectName} @${state.branch}`;
+  const resumeLine = `\`claude --resume ${state.resumeToken}\``;
+  const footer = ctxLine + HARD_BREAK + resumeLine;
 
-  const text = lines.join("\n");
+  // Assemble with double newlines between sections
+  const body = bodyLines.join(HARD_BREAK);
+  const text = [header, body, footer].join("\n\n");
 
   try {
     await editMessageTelegram(bubble.chatId, bubble.messageId, text, {
       accountId: bubble.accountId,
       buttons: [], // Remove buttons (CLEAR_MARKUP style)
+      disableLinkPreview: true,
     });
 
     // Cleanup all session state
@@ -636,6 +652,7 @@ export async function forwardEventToChat(params: {
     await sendMessageTelegram(bubble.chatId, formatted, {
       accountId: bubble.accountId,
       messageThreadId: bubble.threadId,
+      disableLinkPreview: true,
     });
     bubble.lastForwardedEventIndex = eventIndex;
     return true;
@@ -723,6 +740,7 @@ export async function sendRuntimeLimitWarning(params: {
     await sendMessageTelegram(bubble.chatId, text, {
       accountId: bubble.accountId,
       messageThreadId: bubble.threadId,
+      disableLinkPreview: true,
     });
     return true;
   } catch (err) {
@@ -758,6 +776,7 @@ export async function sendQuestionToChat(params: {
     await sendMessageTelegram(bubble.chatId, text, {
       accountId: bubble.accountId,
       messageThreadId: bubble.threadId,
+      disableLinkPreview: true,
     });
     return true;
   } catch (err) {

@@ -242,7 +242,13 @@ export function resolveProject(project: string): ResolvedProject | undefined {
     // Project with worktree: "juzi @experimental"
     const projectDir = findProjectByName(parsed.name);
     if (projectDir) {
+      // Try to find actual worktree first
       workingDir = findWorktree(projectDir, parsed.worktree);
+      // Fall back to main project if worktree not found
+      // (bubble shows @branch even for non-worktree projects)
+      if (!workingDir) {
+        workingDir = projectDir;
+      }
     }
   } else {
     // Simple project name: "juzi"
@@ -364,6 +370,35 @@ export function encodeClaudeProjectPath(dir: string): string {
 export function getSessionDir(workingDir: string): string {
   const encoded = encodeClaudeProjectPath(workingDir);
   return path.join(os.homedir(), ".claude", "projects", encoded);
+}
+
+/**
+ * Get the working directory for a resume token.
+ * This finds the session file and decodes the project path from its location.
+ *
+ * CRITICAL: When resuming, we MUST use the same working directory as the original
+ * session, otherwise Claude Code won't find the session file.
+ */
+export function getWorkingDirFromResumeToken(resumeToken: string): string | undefined {
+  const sessionFile = findSessionFile(resumeToken);
+  if (!sessionFile) {
+    return undefined;
+  }
+
+  // Session file is at: ~/.claude/projects/<encoded-path>/<token>.jsonl
+  // Extract the encoded path from the parent directory name
+  const sessionDir = path.dirname(sessionFile);
+  const encodedPath = path.basename(sessionDir);
+
+  // Decode to get the original working directory
+  const workingDir = decodeClaudeProjectPath(encodedPath);
+
+  // Verify the directory exists
+  if (fs.existsSync(workingDir) && fs.statSync(workingDir).isDirectory()) {
+    return workingDir;
+  }
+
+  return undefined;
 }
 
 /**

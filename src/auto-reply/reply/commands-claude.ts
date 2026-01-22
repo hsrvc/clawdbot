@@ -36,7 +36,6 @@ import {
   createSessionBubble,
   updateSessionBubble,
   completeSessionBubble,
-  forwardEventToChat,
   checkRuntimeLimit,
   pauseSession,
   sendRuntimeLimitWarning,
@@ -461,9 +460,10 @@ export const handleClaudeCommand: CommandHandler = async (params, _allowTextComm
       resumeToken: parsed.token,
       permissionMode: "bypassPermissions",
       prompt: taskPrompt,
-      onEvent: async (event) => {
+      onEvent: async (_event) => {
         if (!sessionId) return;
-        await forwardEventToChat({ sessionId, event, eventIndex: eventIndex++ });
+        eventIndex++;
+        // Events are shown in the bubble via recentActions - no need to forward as separate messages
         if (eventIndex % 10 === 0 && !runtimeLimitWarned) {
           const { exceeded, elapsedHours, limitHours } = checkRuntimeLimit(sessionId);
           if (exceeded && !isSessionPaused(sessionId)) {
@@ -690,15 +690,10 @@ export const handleClaudeCommand: CommandHandler = async (params, _allowTextComm
       project: parsed.project,
       permissionMode: "bypassPermissions",
       prompt: taskPrompt,
-      onEvent: async (event) => {
+      onEvent: async (_event) => {
         if (!sessionId) return;
-
-        // Forward events to chat with emoji formatting
-        await forwardEventToChat({
-          sessionId,
-          event,
-          eventIndex: eventIndex++,
-        });
+        eventIndex++;
+        // Events are shown in the bubble via recentActions - no need to forward as separate messages
 
         // Check runtime limit (every 10 events to reduce overhead)
         if (eventIndex % 10 === 0 && !runtimeLimitWarned) {

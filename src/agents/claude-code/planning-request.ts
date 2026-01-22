@@ -27,6 +27,8 @@ export interface PlanningRequestParams {
     chatId: string;
     threadId?: number;
     accountId?: string;
+    /** Force this resume token (code-level enforcement, overrides DyDo's value) */
+    forcedResumeToken?: string;
   };
 }
 
@@ -69,31 +71,45 @@ function buildQuickStartRequest(params: PlanningRequestParams): string {
 }
 
 /**
- * Build resume request
+ * Build resume request with full orchestration (DyDo enriches the prompt)
  */
 function buildResumeRequest(params: PlanningRequestParams): string {
-  const { project, task, resumeToken } = params;
+  const { project, task, resumeToken, chatContext } = params;
 
   const lines = [
     `[Claude Code Resume Request]`,
     ``,
-    `Resume Token: ${resumeToken}`,
+    `**CRITICAL RULES:**`,
+    `1. You MUST call \`claude_code_start\` tool immediately`,
+    `2. You MUST use EXACTLY this resumeToken: "${resumeToken}"`,
+    `3. Do NOT respond with text messages`,
+    ``,
     `Project: ${project || "(from token)"}`,
-    `New Task: ${task || "continue"}`,
+    `User said: "${task || "continue"}"`,
     ``,
-    `Resume the Claude Code session with this token.`,
-    ``,
-    `Steps:`,
-    `1. Use claude_code_start with resumeToken="${resumeToken}"`,
-    `2. If a new task is provided, use it as the prompt`,
-    `3. Otherwise, use "continue" as the prompt`,
+    `## Required Tool Call`,
+    `Call \`claude_code_start\` with these EXACT values:`,
   ];
+
+  // Build the tool call structure with emphasized token
+  lines.push(`- project: "${project}"`);
+  lines.push(`- resumeToken: "${resumeToken}" ← MUST USE THIS EXACT TOKEN`);
+  lines.push(`- prompt: <add project context to user's request>`);
+  if (chatContext) {
+    lines.push(`- chatId: "${chatContext.chatId}"`);
+    if (chatContext.threadId) lines.push(`- threadId: ${chatContext.threadId}`);
+  }
+
+  lines.push(
+    ``,
+    `**WARNING:** If you omit resumeToken or use a different value, it will start a NEW session instead of resuming. The user wants to CONTINUE their existing session.`,
+  );
 
   return lines.join("\n");
 }
 
 /**
- * Build full planning request
+ * Build full planning request - DyDo acts as orchestrator
  */
 function buildFullPlanningRequest(params: PlanningRequestParams): string {
   const { project, task, worktree, chatContext } = params;
@@ -110,24 +126,29 @@ function buildFullPlanningRequest(params: PlanningRequestParams): string {
     ].join("\n");
   }
 
-  // Task specified - be direct and action-oriented
+  // Task specified - DyDo should call the tool
   const lines = [
-    `[Claude Code Request]`,
+    `[Claude Code Start Request]`,
     ``,
-    `**Project:** ${projectSpec}`,
-    `**Task:** ${task}`,
+    `**CRITICAL: You MUST call the \`claude_code_start\` tool. Do NOT respond with text messages.**`,
     ``,
-    `Start a Claude Code session for this task NOW.`,
+    `Project: ${projectSpec}`,
+    `User said: "${task}"`,
     ``,
-    `Use \`claude_code_start\` with:`,
+    `## Your Task`,
+    `1. BRIEFLY check project context (use \`project_context\` tool)`,
+    `2. Call \`claude_code_start\` with enriched instructions`,
+    ``,
+    `## Tool Call (REQUIRED)`,
   ];
 
-  // Build the tool call example
+  // Build the tool call structure
   lines.push(`\`\`\``);
   lines.push(`claude_code_start({`);
   lines.push(`  project: "${project}",`);
   if (worktree) lines.push(`  worktree: "${worktree}",`);
-  lines.push(`  prompt: "${task.replace(/"/g, '\\"')}",`);
+  lines.push(`  prompt: "<ENRICHED INSTRUCTIONS - add project context>",`);
+  lines.push(`  originalTask: "${task.replace(/"/g, '\\"')}",`);
   if (chatContext) {
     lines.push(`  chatId: "${chatContext.chatId}",`);
     if (chatContext.threadId) lines.push(`  threadId: ${chatContext.threadId},`);
@@ -138,8 +159,10 @@ function buildFullPlanningRequest(params: PlanningRequestParams): string {
 
   lines.push(
     ``,
-    `If the task is ambiguous, you may ask ONE clarifying question first.`,
-    `Otherwise, just start the session with the task above.`,
+    `**Rules:**`,
+    `- DO NOT respond with text messages - call the tool`,
+    `- Add context from project (phase, blockers, etc.) to the prompt`,
+    `- Only ask clarifying question if TRULY ambiguous (rarely needed)`,
   );
 
   return lines.join("\n");
