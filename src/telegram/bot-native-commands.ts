@@ -305,6 +305,9 @@ export const registerTelegramNativeCommands = ({
             CommandTargetSessionKey: route.sessionKey,
             MessageThreadId: resolvedThreadId,
             IsForum: isForum,
+            // Originating context for sub-agent announce routing
+            OriginatingChannel: "telegram" as const,
+            OriginatingTo: `telegram:${chatId}`,
           });
 
           const disableBlockStreaming =
