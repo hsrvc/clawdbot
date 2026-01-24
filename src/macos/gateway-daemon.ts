@@ -136,9 +136,12 @@ async function main() {
 
         // Write restart marker for post-restart notification
         if (isRestart) {
+          defaultRuntime.log("[debug] About to write restart marker...");
           try {
             const { writeRestartMarker } = await import("../agents/gateway-restart-notifier.js");
+            defaultRuntime.log("[debug] Imported writeRestartMarker, calling it...");
             await writeRestartMarker();
+            defaultRuntime.log("[debug] writeRestartMarker completed");
           } catch (err) {
             defaultRuntime.log(`[warn] Failed to write restart marker: ${String(err)}`);
           }
