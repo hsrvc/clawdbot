@@ -352,18 +352,45 @@ The session will run in background. You'll receive questions via conversation.`,
             await updateSessionBubble({ sessionId, state });
           },
 
-          // Blocker handler: notify DyDo when session hits a blocker
+          // Blocker handler: Level 2 - Ask DyDo to assess if blocker is real
           onBlocker: async (blocker) => {
             if (!sessionId) return false;
 
-            log.warn(
-              `[${sessionId}] Blocker detected: ${blocker.reason} (category: ${blocker.matchedPatterns[0] || "unknown"})`,
-            );
+            log.warn(`[${sessionId}] Blocker detected by pattern matching: ${blocker.reason}`);
 
-            // Store blocker info in planning context for later retrieval
+            // Level 2: Get session events and ask DyDo to assess
+            const session = getSession(sessionId);
+            if (!session) {
+              log.error(`[${sessionId}] Session not found for blocker assessment`);
+              return false;
+            }
+
+            // Import blocker assessor
+            const { assessBlocker } = await import("../claude-code/blocker-assessor.js");
+
+            // Ask DyDo: Is this a real blocker?
+            const assessment = await assessBlocker(blocker, session.events, session.status);
+
+            log.info(
+              `[${sessionId}] DyDo assessment: ${assessment.isRealBlocker ? "REAL BLOCKER" : "FALSE POSITIVE"} (confidence: ${assessment.confidence})`,
+            );
+            log.info(`[${sessionId}] Reasoning: ${assessment.reasoning}`);
+
+            // If it's a false positive, ignore it
+            if (!assessment.isRealBlocker) {
+              log.info(
+                `[${sessionId}] Blocker dismissed as false positive. Session marked as completed.`,
+              );
+              return false; // Don't mark as blocked
+            }
+
+            // Real blocker detected - store info
             const context = sessionContexts.get(sessionId);
             if (context) {
-              (context as SessionPlanningContext & { blockerInfo?: unknown }).blockerInfo = blocker;
+              (context as SessionPlanningContext & { blockerInfo?: unknown }).blockerInfo = {
+                ...blocker,
+                assessment,
+              };
             }
 
             // Send notification to chat if available
@@ -373,8 +400,10 @@ The session will run in background. You'll receive questions via conversation.`,
                 const blockerMsg =
                   `⚠️ **Claude Code Session Blocked**\n\n` +
                   `**Project:** ${projectName}\n` +
-                  `**Reason:** ${blocker.reason}\n\n` +
-                  `Session has completed but may need attention.\n\n` +
+                  `**Reason:** ${blocker.reason}\n` +
+                  `**DyDo Assessment:** ${assessment.reasoning}\n` +
+                  `**Confidence:** ${(assessment.confidence * 100).toFixed(0)}%\n\n` +
+                  `Session needs attention.\n\n` +
                   `\`claude --resume ${currentResumeToken}\``;
 
                 await sendMessageTelegram(String(chatId), blockerMsg, {
@@ -383,15 +412,14 @@ The session will run in background. You'll receive questions via conversation.`,
                   disableLinkPreview: true,
                 });
 
-                log.info(`[${sessionId}] Blocker notification sent to chat ${chatId}`);
+                log.info(`[${sessionId}] Real blocker notification sent to chat ${chatId}`);
               } catch (err) {
                 log.error(`[${sessionId}] Failed to send blocker notification: ${err}`);
               }
             }
 
-            // Return false to let session complete (but blocker is recorded)
-            // Return true would keep session in "blocked" state, waiting for intervention
-            return false;
+            // Return true to mark session as "blocked" (needs intervention)
+            return true;
           },
 
           // Question handler: route CC questions to DyDo with AI-driven blocker detection

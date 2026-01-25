@@ -648,6 +648,14 @@ function processEvent(session: ClaudeCodeSessionData, event: SessionEvent): void
     session.status = "running";
   }
 
+  // Level 3: Realtime blocker intervention for assistant messages
+  if (event.type === "assistant_message" && event.text) {
+    // Don't await - run intervention check in background
+    checkRealtimeInterventionAsync(session, event).catch((err) => {
+      log.error(`[${session.id}] Realtime intervention check failed: ${err}`);
+    });
+  }
+
   // Notify event callback
   if (session.onEvent) {
     session.onEvent(event);
@@ -812,4 +820,39 @@ export function cancelSessionByToken(tokenOrPrefix: string): boolean {
     return false;
   }
   return cancelSession(session.id);
+}
+
+/**
+ * Level 3: Check for realtime intervention opportunity (async).
+ *
+ * This runs in the background whenever an assistant message is received.
+ * If DyDo can handle the blocker automatically, it sends a response immediately.
+ */
+async function checkRealtimeInterventionAsync(
+  session: ClaudeCodeSessionData,
+  event: SessionEvent,
+): Promise<void> {
+  // Import interventor module
+  const { checkForRealtimeIntervention } = await import("./realtime-interventor.js");
+
+  // Build session context for DyDo
+  const sessionContext = {
+    sessionId: session.id,
+    projectName: session.projectName || "unknown",
+    recentEvents: session.events.slice(-10),
+  };
+
+  // Ask: Should we intervene?
+  const interventionResult = await checkForRealtimeIntervention(event, sessionContext);
+
+  if (interventionResult.intervened && interventionResult.response) {
+    log.info(
+      `[${session.id}] Level 3: DyDo intervening with response: ${interventionResult.response.slice(0, 100)}...`,
+    );
+
+    // Send response to Claude Code immediately
+    sendInput(session.id, interventionResult.response);
+  } else {
+    log.debug(`[${session.id}] Level 3: No intervention (${interventionResult.reasoning})`);
+  }
 }

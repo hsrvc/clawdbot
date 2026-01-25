@@ -208,21 +208,76 @@ function extractBlockerReason(text: string, category?: string): string {
 }
 
 /**
+ * Completion signals that indicate the session finished successfully.
+ * If present in the last message, it's not a blocker.
+ */
+const COMPLETION_SIGNALS = [
+  /✅.*ready/i,
+  /✓.*ready/i,
+  /all.*complete/i,
+  /finished/i,
+  /done!/i,
+  /successfully/i,
+];
+
+/**
+ * Check if text looks like a list item (markdown list).
+ * List items often contain phrases like "tasks where X needed Y"
+ * which trigger false positives.
+ */
+function isLikelyListItem(text: string): boolean {
+  const lines = text.split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // Markdown list markers
+    if (/^[-*+]\s/.test(trimmed)) return true;
+    // Numbered list
+    if (/^\d+\.\s/.test(trimmed)) return true;
+    // Criteria/signals list headers
+    if (/^(Tasks?|Criteria|Signals?|Examples?|Quantitative|Qualitative).*:/i.test(trimmed))
+      return true;
+  }
+  return false;
+}
+
+/**
+ * Check if the last message contains completion signals.
+ */
+function hasCompletionSignal(text: string): boolean {
+  return COMPLETION_SIGNALS.some((pattern) => pattern.test(text));
+}
+
+/**
  * Check recent events for blocker indicators.
  * Called when session transitions to completed/done state.
  */
 export function checkEventsForBlocker(
   events: SessionEvent[],
-  lastNEvents: number = 5,
+  lastNEvents: number = 2, // Level 1: Reduced from 5 to 2
 ): BlockerInfo | undefined {
   // Get last N assistant messages
   const recentAssistantMessages = events
     .filter((e) => e.type === "assistant_message" && e.text)
     .slice(-lastNEvents);
 
+  // Level 1: Check for completion signals in the very last message
+  if (recentAssistantMessages.length > 0) {
+    const lastMessage = recentAssistantMessages[recentAssistantMessages.length - 1];
+    if (lastMessage.text && hasCompletionSignal(lastMessage.text)) {
+      log.debug("Completion signal detected in last message - skipping blocker check");
+      return undefined;
+    }
+  }
+
   // Check each in reverse order (most recent first)
   for (const event of recentAssistantMessages.reverse()) {
     if (!event.text) continue;
+
+    // Level 1: Skip list items
+    if (isLikelyListItem(event.text)) {
+      log.debug("Skipping list item for blocker detection");
+      continue;
+    }
 
     const blocker = detectBlocker(event.text, true);
     if (blocker) {
