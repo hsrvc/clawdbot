@@ -286,18 +286,28 @@ export async function handleBubbleReply(params: {
       project: fallbackInfo.projectName,
     });
 
-    // Resolve project to get working directory (for worktree info)
-    const resolved = await resolveProject(fallbackInfo.projectName);
-    if (!resolved) {
-      log.warn(`Could not resolve project: ${fallbackInfo.projectName}`);
+    // Get working directory from resume token (CRITICAL: must use correct directory)
+    const { getWorkingDirFromResumeToken } = await import("../agents/claude-code/index.js");
+    const workingDir = getWorkingDirFromResumeToken(fallbackInfo.resumeToken);
+
+    if (!workingDir) {
+      log.error(
+        `Could not find working directory for token ${fallbackInfo.resumeToken.slice(0, 8)}...`,
+      );
       await api
-        .sendMessage(chatId, `Could not find project: ${fallbackInfo.projectName}`, {
-          parse_mode: "Markdown",
-          ...(threadId && { message_thread_id: threadId }),
-        })
+        .sendMessage(
+          chatId,
+          `❌ Could not find session file for token \`${fallbackInfo.resumeToken.slice(0, 8)}...\`\n\nThe session may have been deleted or moved.`,
+          {
+            parse_mode: "Markdown",
+            ...(threadId && { message_thread_id: threadId }),
+          },
+        )
         .catch(() => {});
       return { type: "handled_directly" }; // Error handled
     }
+
+    log.info(`[BUBBLE REPLY] Found working dir from token: ${workingDir}`);
 
     // Route through DyDo for orchestration (enrich prompt with project context)
     // Set forced resume token to ensure code-level enforcement (keyed by chatId)
@@ -308,6 +318,7 @@ export async function handleBubbleReply(params: {
       project: fallbackInfo.projectName,
       task: text,
       resumeToken: fallbackInfo.resumeToken,
+      workingDir, // CRITICAL: pass working dir from token, not from project resolver
       chatContext: {
         chatId: String(chatId),
         threadId,
@@ -364,6 +375,7 @@ export async function handleBubbleReply(params: {
     project: bubble.projectName,
     task: text,
     resumeToken: bubble.resumeToken,
+    workingDir: bubble.workingDir, // CRITICAL: use exact working dir from bubble
     chatContext: {
       chatId: String(chatId),
       threadId,

@@ -132,6 +132,12 @@ const ClaudeCodeStartToolSchema = Type.Object({
   worktree: Type.Optional(
     Type.String({ description: "Worktree/branch name (e.g., @experimental)" }),
   ),
+  workingDir: Type.Optional(
+    Type.String({
+      description:
+        "Working directory (CRITICAL for resume - must match original session directory)",
+    }),
+  ),
   planningDecisions: Type.Optional(
     Type.Array(Type.String(), { description: "Decisions made during planning" }),
   ),
@@ -238,34 +244,52 @@ The session will run in background. You'll receive questions via conversation.`,
       const threadId = typeof params.threadId === "number" ? params.threadId : undefined;
       const accountId = readStringParam(params, "accountId");
 
-      // Resolve project path
+      // Resolve project path with strict priority for resume operations
       let projectPath: string | undefined;
       let projectName: string = projectInput; // Default to input
 
-      // CRITICAL: If resuming, get working directory from the resume token first!
-      // The session file location tells us the exact directory the session was created in.
-      // Using a different directory will cause Claude to create a new session instead.
+      // Extract workingDir from params if provided (highest priority for resume)
+      const explicitWorkingDir = readStringParam(params, "workingDir");
+
+      // CRITICAL: If resuming, working directory MUST be exact or we create a new session!
       if (resumeToken) {
-        const { getWorkingDirFromResumeToken } = await import("../claude-code/index.js");
-        const tokenWorkingDir = getWorkingDirFromResumeToken(resumeToken);
-        if (tokenWorkingDir) {
-          projectPath = tokenWorkingDir;
-          projectName = path.basename(tokenWorkingDir);
+        // Priority 1: Explicit workingDir from planning request (bubble reply path)
+        if (explicitWorkingDir) {
+          projectPath = explicitWorkingDir;
+          projectName = path.basename(explicitWorkingDir);
           // Check for worktree pattern to get better display name
-          const worktreeMatch = tokenWorkingDir.match(/(.+)\/\.worktrees\/([^/]+)$/);
+          const worktreeMatch = explicitWorkingDir.match(/(.+)\/\.worktrees\/([^/]+)$/);
           if (worktreeMatch) {
             projectName = `${path.basename(worktreeMatch[1])} @${worktreeMatch[2]}`;
           }
-          log.info(`[RESUME] Using working dir from token: ${projectPath} (${projectName})`);
+          log.info(`[RESUME] Using explicit working dir: ${projectPath} (${projectName})`);
         } else {
-          log.warn(
-            `[RESUME] Could not find session file for token ${resumeToken.slice(0, 8)}..., falling back to project resolution`,
-          );
-        }
-      }
+          // Priority 2: Get working directory from resume token
+          const { getWorkingDirFromResumeToken } = await import("../claude-code/index.js");
+          const tokenWorkingDir = getWorkingDirFromResumeToken(resumeToken);
 
-      // Fall back to project resolution if we don't have a path yet
-      if (!projectPath) {
+          if (tokenWorkingDir) {
+            projectPath = tokenWorkingDir;
+            projectName = path.basename(tokenWorkingDir);
+            // Check for worktree pattern to get better display name
+            const worktreeMatch = tokenWorkingDir.match(/(.+)\/\.worktrees\/([^/]+)$/);
+            if (worktreeMatch) {
+              projectName = `${path.basename(worktreeMatch[1])} @${worktreeMatch[2]}`;
+            }
+            log.info(`[RESUME] Using working dir from token: ${projectPath} (${projectName})`);
+          } else {
+            // CRITICAL: For resume, we MUST have the correct working directory
+            // Do NOT fallback to project resolution - it might use wrong directory
+            return jsonResult({
+              status: "error",
+              error:
+                `Cannot resume: session file not found for token ${resumeToken.slice(0, 8)}...\n\n` +
+                `The session may have been deleted or moved. Please start a new session.`,
+            });
+          }
+        }
+      } else {
+        // Not resuming - normal project resolution
         // Check if it's a path
         if (projectInput.startsWith("/")) {
           projectPath = projectInput;

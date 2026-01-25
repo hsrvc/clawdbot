@@ -18,6 +18,8 @@ export interface PlanningRequestParams {
   task?: string;
   /** Resume token (for resume action) */
   resumeToken?: string;
+  /** Working directory (CRITICAL for resume - must match original session) */
+  workingDir?: string;
   /** Worktree/branch if specified */
   worktree?: string;
   /** Skip planning (--quick mode) */
@@ -74,14 +76,14 @@ function buildQuickStartRequest(params: PlanningRequestParams): string {
  * Build resume request with full orchestration (DyDo enriches the prompt)
  */
 function buildResumeRequest(params: PlanningRequestParams): string {
-  const { project, task, resumeToken, chatContext } = params;
+  const { project, task, resumeToken, workingDir, chatContext } = params;
 
   const lines = [
     `[Claude Code Resume Request]`,
     ``,
     `**CRITICAL RULES:**`,
     `1. You MUST call \`claude_code_start\` tool immediately`,
-    `2. You MUST use EXACTLY this resumeToken: "${resumeToken}"`,
+    `2. You MUST use EXACTLY these values (copy-paste from below)`,
     `3. Do NOT respond with text messages`,
     ``,
     `Project: ${project || "(from token)"}`,
@@ -91,9 +93,12 @@ function buildResumeRequest(params: PlanningRequestParams): string {
     `Call \`claude_code_start\` with these EXACT values:`,
   ];
 
-  // Build the tool call structure with emphasized token
+  // Build the tool call structure with emphasized critical parameters
   lines.push(`- project: "${project}"`);
   lines.push(`- resumeToken: "${resumeToken}" ← MUST USE THIS EXACT TOKEN`);
+  if (workingDir) {
+    lines.push(`- workingDir: "${workingDir}" ← MUST USE THIS EXACT DIRECTORY`);
+  }
   lines.push(`- prompt: <add project context to user's request>`);
   if (chatContext) {
     lines.push(`- chatId: "${chatContext.chatId}"`);
@@ -102,7 +107,7 @@ function buildResumeRequest(params: PlanningRequestParams): string {
 
   lines.push(
     ``,
-    `**WARNING:** If you omit resumeToken or use a different value, it will start a NEW session instead of resuming. The user wants to CONTINUE their existing session.`,
+    `**WARNING:** If you omit resumeToken/workingDir or use different values, it will start a NEW session instead of resuming. The user wants to CONTINUE their existing session.`,
   );
 
   return lines.join("\n");
