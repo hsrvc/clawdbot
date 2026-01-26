@@ -1,0 +1,8 @@
+{
+  "id": "claude-code-planning",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
