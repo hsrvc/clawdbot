@@ -1,8 +1,8 @@
 import type { Command } from "commander";
 import type { CronJob } from "../../cron/types.js";
 import { danger } from "../../globals.js";
-import { normalizeAgentId } from "../../routing/session-key.js";
 import { defaultRuntime } from "../../runtime.js";
+import { sanitizeAgentId } from "../../routing/session-key.js";
 import type { GatewayRpcOpts } from "../gateway-rpc.js";
 import { addGatewayClientOptions, callGatewayFromCli } from "../gateway-rpc.js";
 import { parsePositiveIntOrUndefined } from "../program/helpers.js";
@@ -80,7 +80,11 @@ export function registerCronAddCommand(cron: Command) {
       .option("--thinking <level>", "Thinking level for agent jobs (off|minimal|low|medium|high)")
       .option("--model <model>", "Model override for agent jobs (provider/model or alias)")
       .option("--timeout-seconds <n>", "Timeout seconds for agent jobs")
-      .option("--deliver", "Deliver agent output", false)
+      .option(
+        "--deliver",
+        "Deliver agent output (required when using last-route delivery without --to)",
+        false,
+      )
       .option("--channel <channel>", `Delivery channel (${getCronChannelOptions()})`, "last")
       .option(
         "--to <dest>",
@@ -136,7 +140,7 @@ export function registerCronAddCommand(cron: Command) {
 
           const agentId =
             typeof opts.agent === "string" && opts.agent.trim()
-              ? normalizeAgentId(opts.agent)
+              ? sanitizeAgentId(opts.agent.trim())
               : undefined;
 
           const payload = (() => {
@@ -159,10 +163,10 @@ export function registerCronAddCommand(cron: Command) {
                   : undefined,
               timeoutSeconds:
                 timeoutSeconds && Number.isFinite(timeoutSeconds) ? timeoutSeconds : undefined,
-              deliver: Boolean(opts.deliver),
+              deliver: opts.deliver ? true : undefined,
               channel: typeof opts.channel === "string" ? opts.channel : "last",
               to: typeof opts.to === "string" && opts.to.trim() ? opts.to.trim() : undefined,
-              bestEffortDeliver: Boolean(opts.bestEffortDeliver),
+              bestEffortDeliver: opts.bestEffortDeliver ? true : undefined,
             };
           })();
 

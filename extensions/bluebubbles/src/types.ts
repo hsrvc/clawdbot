@@ -1,6 +1,13 @@
 export type DmPolicy = "pairing" | "allowlist" | "open" | "disabled";
 export type GroupPolicy = "open" | "disabled" | "allowlist";
 
+export type BlueBubblesGroupConfig = {
+  /** If true, only respond in this group when mentioned. */
+  requireMention?: boolean;
+  /** Optional tool policy overrides for this group. */
+  tools?: { allow?: string[]; deny?: string[] };
+};
+
 export type BlueBubblesAccountConfig = {
   /** Optional display name for this account (used in CLI/UI lists). */
   name?: string;
@@ -31,15 +38,30 @@ export type BlueBubblesAccountConfig = {
   dms?: Record<string, unknown>;
   /** Outbound text chunk size (chars). Default: 4000. */
   textChunkLimit?: number;
+  /** Chunking mode: "newline" (default) splits on every newline; "length" splits by size. */
+  chunkMode?: "length" | "newline";
   blockStreaming?: boolean;
   /** Merge streamed block replies before sending. */
   blockStreamingCoalesce?: Record<string, unknown>;
   /** Max outbound media size in MB. */
   mediaMaxMb?: number;
+  /** Send read receipts for incoming messages (default: true). */
+  sendReadReceipts?: boolean;
+  /** Per-group configuration keyed by chat GUID or identifier. */
+  groups?: Record<string, BlueBubblesGroupConfig>;
 };
 
 export type BlueBubblesActionConfig = {
   reactions?: boolean;
+  edit?: boolean;
+  unsend?: boolean;
+  reply?: boolean;
+  sendWithEffect?: boolean;
+  renameGroup?: boolean;
+  addParticipant?: boolean;
+  removeParticipant?: boolean;
+  leaveGroup?: boolean;
+  sendAttachment?: boolean;
 };
 
 export type BlueBubblesConfig = {

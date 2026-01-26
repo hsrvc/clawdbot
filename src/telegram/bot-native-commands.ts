@@ -1,6 +1,7 @@
 import type { Bot, Context } from "grammy";
 
 import { resolveEffectiveMessagesConfig } from "../agents/identity.js";
+import { resolveChunkMode } from "../auto-reply/chunk.js";
 import {
   buildCommandTextFromArgs,
   findCommandByNativeName,
@@ -15,7 +16,9 @@ import { resolveTelegramCustomCommands } from "../config/telegram-custom-command
 import { dispatchReplyWithBufferedBlockDispatcher } from "../auto-reply/reply/provider-dispatcher.js";
 import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
 import { danger, logVerbose } from "../globals.js";
+import { resolveMarkdownTableMode } from "../config/markdown-tables.js";
 import { resolveAgentRoute } from "../routing/resolve-route.js";
+import { resolveThreadSessionKeys } from "../routing/session-key.js";
 import { resolveCommandAuthorizedFromAuthorizers } from "../channels/command-gating.js";
 import type { ChannelGroupPolicy } from "../config/group-policy.js";
 import type {
@@ -84,7 +87,7 @@ export const registerTelegramNativeCommands = ({
   const skillCommands =
     nativeEnabled && nativeSkillsEnabled ? listSkillCommandsForAgents({ cfg }) : [];
   const nativeCommands = nativeEnabled
-    ? listNativeCommandSpecsForConfig(cfg, { skillCommands })
+    ? listNativeCommandSpecsForConfig(cfg, { skillCommands, provider: "telegram" })
     : [];
   const reservedCommands = new Set(
     listNativeCommandSpecs().map((command) => command.name.toLowerCase()),
@@ -215,7 +218,7 @@ export const registerTelegramNativeCommands = ({
             return;
           }
 
-          const commandDefinition = findCommandByNativeName(command.name);
+          const commandDefinition = findCommandByNativeName(command.name, "telegram");
           const rawText = ctx.match?.trim() ?? "";
           const commandArgs = commandDefinition
             ? parseCommandArgs(commandDefinition, rawText)
@@ -269,6 +272,18 @@ export const registerTelegramNativeCommands = ({
               id: isGroup ? buildTelegramGroupPeerId(chatId, resolvedThreadId) : String(chatId),
             },
           });
+          const baseSessionKey = route.sessionKey;
+          const dmThreadId = !isGroup ? resolvedThreadId : undefined;
+          const threadKeys =
+            dmThreadId != null
+              ? resolveThreadSessionKeys({ baseSessionKey, threadId: String(dmThreadId) })
+              : null;
+          const sessionKey = threadKeys?.sessionKey ?? baseSessionKey;
+          const tableMode = resolveMarkdownTableMode({
+            cfg,
+            channel: "telegram",
+            accountId: route.accountId,
+          });
           const skillFilter = firstDefined(topicConfig?.skills, groupConfig?.skills);
           const systemPromptParts = [
             groupConfig?.systemPrompt?.trim() || null,
@@ -302,7 +317,7 @@ export const registerTelegramNativeCommands = ({
             CommandAuthorized: commandAuthorized,
             CommandSource: "native" as const,
             SessionKey: `telegram:slash:${senderId || chatId}`,
-            CommandTargetSessionKey: route.sessionKey,
+            CommandTargetSessionKey: sessionKey,
             MessageThreadId: resolvedThreadId,
             IsForum: isForum,
             // Originating context for sub-agent announce routing
@@ -314,6 +329,7 @@ export const registerTelegramNativeCommands = ({
             typeof telegramCfg.blockStreaming === "boolean"
               ? !telegramCfg.blockStreaming
               : undefined;
+          const chunkMode = resolveChunkMode(cfg, "telegram", route.accountId);
 
           await dispatchReplyWithBufferedBlockDispatcher({
             ctx: ctxPayload,
@@ -330,6 +346,9 @@ export const registerTelegramNativeCommands = ({
                   replyToMode,
                   textLimit,
                   messageThreadId: resolvedThreadId,
+                  tableMode,
+                  chunkMode,
+                  linkPreview: telegramCfg.linkPreview,
                 });
               },
               onError: (err, info) => {

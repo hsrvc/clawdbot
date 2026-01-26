@@ -97,7 +97,7 @@ export async function maybeMigrateLegacyGatewayService(
 
   const daemonRuntime = await prompter.select<GatewayDaemonRuntime>(
     {
-      message: "Gateway daemon runtime",
+      message: "Gateway service runtime",
       options: GATEWAY_DAEMON_RUNTIME_OPTIONS,
       initialValue: DEFAULT_GATEWAY_DAEMON_RUNTIME,
     },
@@ -110,6 +110,7 @@ export async function maybeMigrateLegacyGatewayService(
     token: cfg.gateway?.auth?.token ?? process.env.CLAWDBOT_GATEWAY_TOKEN,
     runtime: daemonRuntime,
     warn: (message, title) => note(message, title),
+    config: cfg,
   });
   try {
     await service.install({
@@ -120,7 +121,7 @@ export async function maybeMigrateLegacyGatewayService(
       environment,
     });
   } catch (err) {
-    runtime.error(`Gateway daemon install failed: ${String(err)}`);
+    runtime.error(`Gateway service install failed: ${String(err)}`);
     note(gatewayInstallErrorHint(), "Gateway");
   }
 }
@@ -177,6 +178,7 @@ export async function maybeRepairGatewayServiceConfig(
     runtime: needsNodeRuntime && systemNodePath ? "node" : runtimeChoice,
     nodePath: systemNodePath ?? undefined,
     warn: (message, title) => note(message, title),
+    config: cfg,
   });
   const expectedEntrypoint = findGatewayEntrypoint(programArguments);
   const currentEntrypoint = findGatewayEntrypoint(command.programArguments);

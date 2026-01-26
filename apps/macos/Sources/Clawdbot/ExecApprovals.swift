@@ -84,11 +84,52 @@ enum ExecApprovalDecision: String, Codable, Sendable {
     case deny
 }
 
-struct ExecAllowlistEntry: Codable, Hashable {
+struct ExecAllowlistEntry: Codable, Hashable, Identifiable {
+    var id: UUID
     var pattern: String
-    var lastUsedAt: Double? = nil
-    var lastUsedCommand: String? = nil
-    var lastResolvedPath: String? = nil
+    var lastUsedAt: Double?
+    var lastUsedCommand: String?
+    var lastResolvedPath: String?
+
+    init(
+        id: UUID = UUID(),
+        pattern: String,
+        lastUsedAt: Double? = nil,
+        lastUsedCommand: String? = nil,
+        lastResolvedPath: String? = nil)
+    {
+        self.id = id
+        self.pattern = pattern
+        self.lastUsedAt = lastUsedAt
+        self.lastUsedCommand = lastUsedCommand
+        self.lastResolvedPath = lastResolvedPath
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case pattern
+        case lastUsedAt
+        case lastUsedCommand
+        case lastResolvedPath
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        self.pattern = try container.decode(String.self, forKey: .pattern)
+        self.lastUsedAt = try container.decodeIfPresent(Double.self, forKey: .lastUsedAt)
+        self.lastUsedCommand = try container.decodeIfPresent(String.self, forKey: .lastUsedCommand)
+        self.lastResolvedPath = try container.decodeIfPresent(String.self, forKey: .lastResolvedPath)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.id, forKey: .id)
+        try container.encode(self.pattern, forKey: .pattern)
+        try container.encodeIfPresent(self.lastUsedAt, forKey: .lastUsedAt)
+        try container.encodeIfPresent(self.lastUsedCommand, forKey: .lastUsedCommand)
+        try container.encodeIfPresent(self.lastResolvedPath, forKey: .lastResolvedPath)
+    }
 }
 
 struct ExecApprovalsDefaults: Codable {
@@ -149,6 +190,7 @@ struct ExecApprovalsResolvedDefaults {
 
 enum ExecApprovalsStore {
     private static let logger = Logger(subsystem: "com.clawdbot", category: "exec-approvals")
+    private static let defaultAgentId = "main"
     private static let defaultSecurity: ExecSecurity = .deny
     private static let defaultAsk: ExecAsk = .onMiss
     private static let defaultAskFallback: ExecSecurity = .deny
@@ -165,18 +207,27 @@ enum ExecApprovalsStore {
     static func normalizeIncoming(_ file: ExecApprovalsFile) -> ExecApprovalsFile {
         let socketPath = file.socket?.path?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let token = file.socket?.token?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var agents = file.agents ?? [:]
+        if let legacyDefault = agents["default"] {
+            if let main = agents[self.defaultAgentId] {
+                agents[self.defaultAgentId] = self.mergeAgents(current: main, legacy: legacyDefault)
+            } else {
+                agents[self.defaultAgentId] = legacyDefault
+            }
+            agents.removeValue(forKey: "default")
+        }
         return ExecApprovalsFile(
             version: 1,
             socket: ExecApprovalsSocketConfig(
                 path: socketPath.isEmpty ? nil : socketPath,
                 token: token.isEmpty ? nil : token),
             defaults: file.defaults,
-            agents: file.agents)
+            agents: agents)
     }
 
     static func readSnapshot() -> ExecApprovalsSnapshot {
         let url = self.fileURL()
-        guard FileManager.default.fileExists(atPath: url.path) else {
+        guard FileManager().fileExists(atPath: url.path) else {
             return ExecApprovalsSnapshot(
                 path: url.path,
                 exists: false,
@@ -216,7 +267,7 @@ enum ExecApprovalsStore {
 
     static func loadFile() -> ExecApprovalsFile {
         let url = self.fileURL()
-        guard FileManager.default.fileExists(atPath: url.path) else {
+        guard FileManager().fileExists(atPath: url.path) else {
             return ExecApprovalsFile(version: 1, socket: nil, defaults: nil, agents: [:])
         }
         do {
@@ -238,11 +289,11 @@ enum ExecApprovalsStore {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let data = try encoder.encode(file)
             let url = self.fileURL()
-            try FileManager.default.createDirectory(
+            try FileManager().createDirectory(
                 at: url.deletingLastPathComponent(),
                 withIntermediateDirectories: true)
             try data.write(to: url, options: [.atomic])
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            try? FileManager().setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         } catch {
             self.logger.error("exec approvals save failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -272,18 +323,20 @@ enum ExecApprovalsStore {
             ask: defaults.ask ?? self.defaultAsk,
             askFallback: defaults.askFallback ?? self.defaultAskFallback,
             autoAllowSkills: defaults.autoAllowSkills ?? self.defaultAutoAllowSkills)
-        let key = (agentId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
-            ? agentId!.trimmingCharacters(in: .whitespacesAndNewlines)
-            : "default"
+        let key = self.agentKey(agentId)
         let agentEntry = file.agents?[key] ?? ExecApprovalsAgent()
+        let wildcardEntry = file.agents?["*"] ?? ExecApprovalsAgent()
         let resolvedAgent = ExecApprovalsResolvedDefaults(
-            security: agentEntry.security ?? resolvedDefaults.security,
-            ask: agentEntry.ask ?? resolvedDefaults.ask,
-            askFallback: agentEntry.askFallback ?? resolvedDefaults.askFallback,
-            autoAllowSkills: agentEntry.autoAllowSkills ?? resolvedDefaults.autoAllowSkills)
-        let allowlist = (agentEntry.allowlist ?? [])
+            security: agentEntry.security ?? wildcardEntry.security ?? resolvedDefaults.security,
+            ask: agentEntry.ask ?? wildcardEntry.ask ?? resolvedDefaults.ask,
+            askFallback: agentEntry.askFallback ?? wildcardEntry.askFallback
+                ?? resolvedDefaults.askFallback,
+            autoAllowSkills: agentEntry.autoAllowSkills ?? wildcardEntry.autoAllowSkills
+                ?? resolvedDefaults.autoAllowSkills)
+        let allowlist = ((wildcardEntry.allowlist ?? []) + (agentEntry.allowlist ?? []))
             .map { entry in
                 ExecAllowlistEntry(
+                    id: entry.id,
                     pattern: entry.pattern.trimmingCharacters(in: .whitespacesAndNewlines),
                     lastUsedAt: entry.lastUsedAt,
                     lastUsedCommand: entry.lastUsedCommand,
@@ -368,6 +421,7 @@ enum ExecApprovalsStore {
             let allowlist = (entry.allowlist ?? []).map { item -> ExecAllowlistEntry in
                 guard item.pattern == pattern else { return item }
                 return ExecAllowlistEntry(
+                    id: item.id,
                     pattern: item.pattern,
                     lastUsedAt: Date().timeIntervalSince1970 * 1000,
                     lastUsedCommand: command,
@@ -387,6 +441,7 @@ enum ExecApprovalsStore {
             let cleaned = allowlist
                 .map { item in
                     ExecAllowlistEntry(
+                        id: item.id,
                         pattern: item.pattern.trimmingCharacters(in: .whitespacesAndNewlines),
                         lastUsedAt: item.lastUsedAt,
                         lastUsedCommand: item.lastUsedCommand,
@@ -442,11 +497,11 @@ enum ExecApprovalsStore {
     private static func expandPath(_ raw: String) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed == "~" {
-            return FileManager.default.homeDirectoryForCurrentUser.path
+            return FileManager().homeDirectoryForCurrentUser.path
         }
         if trimmed.hasPrefix("~/") {
             let suffix = trimmed.dropFirst(2)
-            return FileManager.default.homeDirectoryForCurrentUser
+            return FileManager().homeDirectoryForCurrentUser
                 .appendingPathComponent(String(suffix)).path
         }
         return trimmed
@@ -454,7 +509,40 @@ enum ExecApprovalsStore {
 
     private static func agentKey(_ agentId: String?) -> String {
         let trimmed = agentId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? "default" : trimmed
+        return trimmed.isEmpty ? self.defaultAgentId : trimmed
+    }
+
+    private static func normalizedPattern(_ pattern: String?) -> String? {
+        let trimmed = pattern?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed.lowercased()
+    }
+
+    private static func mergeAgents(
+        current: ExecApprovalsAgent,
+        legacy: ExecApprovalsAgent) -> ExecApprovalsAgent
+    {
+        var seen = Set<String>()
+        var allowlist: [ExecAllowlistEntry] = []
+        func append(_ entry: ExecAllowlistEntry) {
+            guard let key = self.normalizedPattern(entry.pattern), !seen.contains(key) else {
+                return
+            }
+            seen.insert(key)
+            allowlist.append(entry)
+        }
+        for entry in current.allowlist ?? [] {
+            append(entry)
+        }
+        for entry in legacy.allowlist ?? [] {
+            append(entry)
+        }
+
+        return ExecApprovalsAgent(
+            security: current.security ?? legacy.security,
+            ask: current.ask ?? legacy.ask,
+            askFallback: current.askFallback ?? legacy.askFallback,
+            autoAllowSkills: current.autoAllowSkills ?? legacy.autoAllowSkills,
+            allowlist: allowlist.isEmpty ? nil : allowlist)
     }
 }
 
@@ -497,7 +585,7 @@ struct ExecCommandResolution: Sendable {
                     return expanded
                 }
                 let base = cwd?.trimmingCharacters(in: .whitespacesAndNewlines)
-                let root = (base?.isEmpty == false) ? base! : FileManager.default.currentDirectoryPath
+                let root = (base?.isEmpty == false) ? base! : FileManager().currentDirectoryPath
                 return URL(fileURLWithPath: root).appendingPathComponent(expanded).path
             }
             let searchPaths = self.searchPaths(from: env)
@@ -550,6 +638,30 @@ enum ExecCommandFormatter {
         let trimmed = rawCommand?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !trimmed.isEmpty { return trimmed }
         return self.displayString(for: argv)
+    }
+}
+
+enum ExecApprovalHelpers {
+    static func parseDecision(_ raw: String?) -> ExecApprovalDecision? {
+        let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        return ExecApprovalDecision(rawValue: trimmed)
+    }
+
+    static func requiresAsk(
+        ask: ExecAsk,
+        security: ExecSecurity,
+        allowlistMatch: ExecAllowlistEntry?,
+        skillAllow: Bool) -> Bool
+    {
+        if ask == .always { return true }
+        if ask == .onMiss, security == .allowlist, allowlistMatch == nil, !skillAllow { return true }
+        return false
+    }
+
+    static func allowlistPattern(command: [String], resolution: ExecCommandResolution?) -> String? {
+        let pattern = resolution?.resolvedPath ?? resolution?.rawExecutable ?? command.first ?? ""
+        return pattern.isEmpty ? nil : pattern
     }
 }
 

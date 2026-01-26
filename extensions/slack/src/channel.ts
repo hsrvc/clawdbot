@@ -19,7 +19,10 @@ import {
   readStringParam,
   resolveDefaultSlackAccountId,
   resolveSlackAccount,
+  resolveSlackReplyToMode,
   resolveSlackGroupRequireMention,
+  resolveSlackGroupToolPolicy,
+  buildSlackThreadingToolContext,
   setAccountEnabledInConfigSection,
   slackOnboardingAdapter,
   SlackConfigSchema,
@@ -159,23 +162,13 @@ export const slackPlugin: ChannelPlugin<ResolvedSlackAccount> = {
   },
   groups: {
     resolveRequireMention: resolveSlackGroupRequireMention,
+    resolveToolPolicy: resolveSlackGroupToolPolicy,
   },
   threading: {
-    resolveReplyToMode: ({ cfg, accountId }) =>
-      resolveSlackAccount({ cfg, accountId }).replyToMode ?? "off",
+    resolveReplyToMode: ({ cfg, accountId, chatType }) =>
+      resolveSlackReplyToMode(resolveSlackAccount({ cfg, accountId }), chatType),
     allowTagsWhenOff: true,
-    buildToolContext: ({ cfg, accountId, context, hasRepliedRef }) => {
-      const configuredReplyToMode = resolveSlackAccount({ cfg, accountId }).replyToMode ?? "off";
-      const effectiveReplyToMode = context.ThreadLabel ? "all" : configuredReplyToMode;
-      return {
-        currentChannelId: context.To?.startsWith("channel:")
-          ? context.To.slice("channel:".length)
-          : undefined,
-        currentThreadTs: context.ReplyToId,
-        replyToMode: effectiveReplyToMode,
-        hasRepliedRef,
-      };
-    },
+    buildToolContext: (params) => buildSlackThreadingToolContext(params),
   },
   messaging: {
     normalizeTarget: normalizeSlackMessagingTarget,

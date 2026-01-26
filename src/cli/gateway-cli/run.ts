@@ -18,6 +18,7 @@ import { formatPortDiagnostics, inspectPortUsage } from "../../infra/ports.js";
 import { setConsoleSubsystemFilter, setConsoleTimestampPrefix } from "../../logging/console.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { defaultRuntime } from "../../runtime.js";
+import { formatCliCommand } from "../command-format.js";
 import { forceFreePortAndWait } from "../ports.js";
 import { ensureDevGatewayConfig } from "./dev.js";
 import { runGatewayLoop } from "./run-loop.js";
@@ -161,7 +162,7 @@ async function runGatewayCommand(opts: GatewayRunOpts) {
   if (!opts.allowUnconfigured && mode !== "local") {
     if (!configExists) {
       defaultRuntime.error(
-        "Missing config. Run `clawdbot setup` or set gateway.mode=local (or pass --allow-unconfigured).",
+        `Missing config. Run \`${formatCliCommand("clawdbot setup")}\` or set gateway.mode=local (or pass --allow-unconfigured).`,
       );
     } else {
       defaultRuntime.error(
@@ -173,11 +174,15 @@ async function runGatewayCommand(opts: GatewayRunOpts) {
   }
   const bindRaw = toOptionString(opts.bind) ?? cfg.gateway?.bind ?? "loopback";
   const bind =
-    bindRaw === "loopback" || bindRaw === "lan" || bindRaw === "auto" || bindRaw === "custom"
+    bindRaw === "loopback" ||
+    bindRaw === "lan" ||
+    bindRaw === "auto" ||
+    bindRaw === "custom" ||
+    bindRaw === "tailnet"
       ? bindRaw
       : null;
   if (!bind) {
-    defaultRuntime.error('Invalid --bind (use "loopback", "lan", "auto", or "custom")');
+    defaultRuntime.error('Invalid --bind (use "loopback", "lan", "tailnet", "auto", or "custom")');
     defaultRuntime.exit(1);
     return;
   }
@@ -198,6 +203,10 @@ async function runGatewayCommand(opts: GatewayRunOpts) {
   const resolvedAuthMode = resolvedAuth.mode;
   const tokenValue = resolvedAuth.token;
   const passwordValue = resolvedAuth.password;
+  const hasToken = typeof tokenValue === "string" && tokenValue.trim().length > 0;
+  const hasPassword = typeof passwordValue === "string" && passwordValue.trim().length > 0;
+  const hasSharedSecret =
+    (resolvedAuthMode === "token" && hasToken) || (resolvedAuthMode === "password" && hasPassword);
   const authHints: string[] = [];
   if (miskeys.hasGatewayToken) {
     authHints.push('Found "gateway.token" in config. Use "gateway.auth.token" instead.');
@@ -207,7 +216,7 @@ async function runGatewayCommand(opts: GatewayRunOpts) {
       '"gateway.remote.token" is for remote CLI calls; it does not enable local gateway auth.',
     );
   }
-  if (resolvedAuthMode === "token" && !tokenValue) {
+  if (resolvedAuthMode === "token" && !hasToken && !resolvedAuth.allowTailscale) {
     defaultRuntime.error(
       [
         "Gateway auth is set to token, but no token is configured.",
@@ -220,7 +229,7 @@ async function runGatewayCommand(opts: GatewayRunOpts) {
     defaultRuntime.exit(1);
     return;
   }
-  if (resolvedAuthMode === "password" && !passwordValue) {
+  if (resolvedAuthMode === "password" && !hasPassword) {
     defaultRuntime.error(
       [
         "Gateway auth is set to password, but no password is configured.",
@@ -233,11 +242,11 @@ async function runGatewayCommand(opts: GatewayRunOpts) {
     defaultRuntime.exit(1);
     return;
   }
-  if (bind !== "loopback" && resolvedAuthMode === "none") {
+  if (bind !== "loopback" && !hasSharedSecret) {
     defaultRuntime.error(
       [
         `Refusing to bind gateway to ${bind} without auth.`,
-        "Set gateway.auth.token (or CLAWDBOT_GATEWAY_TOKEN) or pass --token.",
+        "Set gateway.auth.token/password (or CLAWDBOT_GATEWAY_TOKEN/CLAWDBOT_GATEWAY_PASSWORD) or pass --token/--password.",
         ...authHints,
       ]
         .filter(Boolean)
@@ -277,7 +286,7 @@ async function runGatewayCommand(opts: GatewayRunOpts) {
     ) {
       const errMessage = describeUnknownError(err);
       defaultRuntime.error(
-        `Gateway failed to start: ${errMessage}\nIf the gateway is supervised, stop it with: clawdbot daemon stop`,
+        `Gateway failed to start: ${errMessage}\nIf the gateway is supervised, stop it with: ${formatCliCommand("clawdbot gateway stop")}`,
       );
       try {
         const diagnostics = await inspectPortUsage(port);
@@ -303,7 +312,7 @@ export function addGatewayRunCommand(cmd: Command): Command {
     .option("--port <port>", "Port for the gateway WebSocket")
     .option(
       "--bind <mode>",
-      'Bind mode ("loopback"|"tailnet"|"lan"|"auto"). Defaults to config gateway.bind (or loopback).',
+      'Bind mode ("loopback"|"lan"|"tailnet"|"auto"|"custom"). Defaults to config gateway.bind (or loopback).',
     )
     .option(
       "--token <token>",

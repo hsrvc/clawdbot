@@ -30,7 +30,7 @@ The onboarding wizard generates a gateway token by default, so paste it here on 
 ## What it can do (today)
 - Chat with the model via Gateway WS (`chat.history`, `chat.send`, `chat.abort`, `chat.inject`)
 - Stream tool calls + live tool output cards in Chat (agent events)
-- Channels: WhatsApp/Telegram status + QR login + per-channel config (`channels.status`, `web.login.*`, `config.patch`)
+- Channels: WhatsApp/Telegram/Discord/Slack + plugin channels (Mattermost, etc.) status + QR login + per-channel config (`channels.status`, `web.login.*`, `config.patch`)
 - Instances: presence list + refresh (`system-presence`)
 - Sessions: list + per-session thinking/verbose overrides (`sessions.list`, `sessions.patch`)
 - Cron jobs: list/add/run/enable/disable + run history (`cron.*`)
@@ -70,10 +70,11 @@ Open:
 
 By default, Serve requests can authenticate via Tailscale identity headers
 (`tailscale-user-login`) when `gateway.auth.allowTailscale` is `true`. Clawdbot
-only accepts these when the request hits loopback with Tailscale’s
-`x-forwarded-*` headers. Set `gateway.auth.allowTailscale: false` (or force
-`gateway.auth.mode: "password"`) if you want to require a token/password even
-for Serve traffic.
+verifies the identity by resolving the `x-forwarded-for` address with
+`tailscale whois` and matching it to the header, and only accepts these when the
+request hits loopback with Tailscale’s `x-forwarded-*` headers. Set
+`gateway.auth.allowTailscale: false` (or force `gateway.auth.mode: "password"`)
+if you want to require a token/password even for Serve traffic.
 
 ### Bind to tailnet + token
 
@@ -85,6 +86,33 @@ Then open:
 - `http://<tailscale-ip>:18789/` (or your configured `gateway.controlUi.basePath`)
 
 Paste the token into the UI settings (sent as `connect.params.auth.token`).
+
+## Insecure HTTP
+
+If you open the dashboard over plain HTTP (`http://<lan-ip>` or `http://<tailscale-ip>`),
+the browser runs in a **non-secure context** and blocks WebCrypto. By default,
+Clawdbot **blocks** Control UI connections without device identity.
+
+**Recommended fix:** use HTTPS (Tailscale Serve) or open the UI locally:
+- `https://<magicdns>/` (Serve)
+- `http://127.0.0.1:18789/` (on the gateway host)
+
+**Downgrade example (token-only over HTTP):**
+
+```json5
+{
+  gateway: {
+    controlUi: { allowInsecureAuth: true },
+    bind: "tailnet",
+    auth: { mode: "token", token: "replace-me" }
+  }
+}
+```
+
+This disables device identity + pairing for the Control UI (even on HTTPS). Use
+only if you trust the network.
+
+See [Tailscale](/gateway/tailscale) for HTTPS setup guidance.
 
 ## Building the UI
 
@@ -107,3 +135,29 @@ pnpm ui:dev # auto-installs UI deps on first run
 ```
 
 Then point the UI at your Gateway WS URL (e.g. `ws://127.0.0.1:18789`).
+
+## Debugging/testing: dev server + remote Gateway
+
+The Control UI is static files; the WebSocket target is configurable and can be
+different from the HTTP origin. This is handy when you want the Vite dev server
+locally but the Gateway runs elsewhere.
+
+1) Start the UI dev server: `pnpm ui:dev`
+2) Open a URL like:
+
+```text
+http://localhost:5173/?gatewayUrl=ws://<gateway-host>:18789
+```
+
+Optional one-time auth (if needed):
+
+```text
+http://localhost:5173/?gatewayUrl=wss://<gateway-host>:18789&token=<gateway-token>
+```
+
+Notes:
+- `gatewayUrl` is stored in localStorage after load and removed from the URL.
+- `token` is stored in localStorage; `password` is kept in memory only.
+- Use `wss://` when the Gateway is behind TLS (Tailscale Serve, HTTPS proxy, etc.).
+
+Remote access setup details: [Remote access](/gateway/remote).

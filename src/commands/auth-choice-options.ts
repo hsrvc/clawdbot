@@ -21,6 +21,7 @@ export type AuthChoiceGroupId =
   | "opencode-zen"
   | "minimax"
   | "synthetic"
+  | "venice"
   | "qwen";
 
 export type AuthChoiceGroup = {
@@ -46,7 +47,7 @@ const AUTH_CHOICE_GROUP_DEFS: {
     value: "anthropic",
     label: "Anthropic",
     hint: "Claude Code CLI + API key",
-    choices: ["claude-cli", "setup-token", "token", "apiKey"],
+    choices: ["token", "claude-cli", "apiKey"],
   },
   {
     value: "minimax",
@@ -65,6 +66,12 @@ const AUTH_CHOICE_GROUP_DEFS: {
     label: "Synthetic",
     hint: "Anthropic-compatible (multi-model)",
     choices: ["synthetic-api-key"],
+  },
+  {
+    value: "venice",
+    label: "Venice AI",
+    hint: "Privacy-focused (uncensored models)",
+    choices: ["venice-api-key"],
   },
   {
     value: "google",
@@ -171,12 +178,6 @@ export function buildAuthChoiceOptions(params: {
   }
 
   options.push({
-    value: "setup-token",
-    label: "Anthropic token (run setup-token)",
-    hint: "runs `claude setup-token` · opens browser for fresh OAuth login",
-  });
-
-  options.push({
     value: "token",
     label: "Anthropic token (paste setup-token)",
     hint: "run `claude setup-token` elsewhere, then paste the token here",
@@ -196,6 +197,11 @@ export function buildAuthChoiceOptions(params: {
   options.push({ value: "moonshot-api-key", label: "Moonshot AI API key" });
   options.push({ value: "kimi-code-api-key", label: "Kimi Code API key" });
   options.push({ value: "synthetic-api-key", label: "Synthetic API key" });
+  options.push({
+    value: "venice-api-key",
+    label: "Venice AI API key",
+    hint: "Privacy-focused inference (uncensored models)",
+  });
   options.push({
     value: "github-copilot",
     label: "GitHub Copilot (GitHub device login)",

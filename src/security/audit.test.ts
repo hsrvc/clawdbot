@@ -53,6 +53,55 @@ describe("security audit", () => {
     ).toBe(true);
   });
 
+  it("warns when loopback control UI lacks trusted proxies", async () => {
+    const cfg: ClawdbotConfig = {
+      gateway: {
+        bind: "loopback",
+        controlUi: { enabled: true },
+      },
+    };
+
+    const res = await runSecurityAudit({
+      config: cfg,
+      includeFilesystem: false,
+      includeChannelSecurity: false,
+    });
+
+    expect(res.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          checkId: "gateway.trusted_proxies_missing",
+          severity: "warn",
+        }),
+      ]),
+    );
+  });
+
+  it("flags loopback control UI without auth as critical", async () => {
+    const cfg: ClawdbotConfig = {
+      gateway: {
+        bind: "loopback",
+        controlUi: { enabled: true },
+        auth: { mode: "none" as any },
+      },
+    };
+
+    const res = await runSecurityAudit({
+      config: cfg,
+      includeFilesystem: false,
+      includeChannelSecurity: false,
+    });
+
+    expect(res.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          checkId: "gateway.loopback_no_auth",
+          severity: "critical",
+        }),
+      ]),
+    );
+  });
+
   it("flags logging.redactSensitive=off", async () => {
     const cfg: ClawdbotConfig = {
       logging: { redactSensitive: "off" },
@@ -69,6 +118,56 @@ describe("security audit", () => {
         expect.objectContaining({ checkId: "logging.redact_off", severity: "warn" }),
       ]),
     );
+  });
+
+  it("warns when small models are paired with web/browser tools", async () => {
+    const cfg: ClawdbotConfig = {
+      agents: { defaults: { model: { primary: "ollama/mistral-8b" } } },
+      tools: {
+        web: {
+          search: { enabled: true },
+          fetch: { enabled: true },
+        },
+      },
+      browser: { enabled: true },
+    };
+
+    const res = await runSecurityAudit({
+      config: cfg,
+      includeFilesystem: false,
+      includeChannelSecurity: false,
+    });
+
+    const finding = res.findings.find((f) => f.checkId === "models.small_params");
+    expect(finding?.severity).toBe("critical");
+    expect(finding?.detail).toContain("mistral-8b");
+    expect(finding?.detail).toContain("web_search");
+    expect(finding?.detail).toContain("web_fetch");
+    expect(finding?.detail).toContain("browser");
+  });
+
+  it("treats small models as safe when sandbox is on and web tools are disabled", async () => {
+    const cfg: ClawdbotConfig = {
+      agents: { defaults: { model: { primary: "ollama/mistral-8b" }, sandbox: { mode: "all" } } },
+      tools: {
+        web: {
+          search: { enabled: false },
+          fetch: { enabled: false },
+        },
+      },
+      browser: { enabled: false },
+    };
+
+    const res = await runSecurityAudit({
+      config: cfg,
+      includeFilesystem: false,
+      includeChannelSecurity: false,
+    });
+
+    const finding = res.findings.find((f) => f.checkId === "models.small_params");
+    expect(finding?.severity).toBe("info");
+    expect(finding?.detail).toContain("mistral-8b");
+    expect(finding?.detail).toContain("sandbox=all");
   });
 
   it("flags tools.elevated allowFrom wildcard as critical", async () => {
@@ -175,6 +274,29 @@ describe("security audit", () => {
       if (prev === undefined) delete process.env.CLAWDBOT_BROWSER_CONTROL_TOKEN;
       else process.env.CLAWDBOT_BROWSER_CONTROL_TOKEN = prev;
     }
+  });
+
+  it("warns when control UI allows insecure auth", async () => {
+    const cfg: ClawdbotConfig = {
+      gateway: {
+        controlUi: { allowInsecureAuth: true },
+      },
+    };
+
+    const res = await runSecurityAudit({
+      config: cfg,
+      includeFilesystem: false,
+      includeChannelSecurity: false,
+    });
+
+    expect(res.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          checkId: "gateway.control_ui.insecure_auth",
+          severity: "warn",
+        }),
+      ]),
+    );
   });
 
   it("warns when multiple DM senders share the main session", async () => {
@@ -581,6 +703,31 @@ describe("security audit", () => {
         expect.objectContaining({ checkId: "hooks.token_too_short", severity: "warn" }),
       ]),
     );
+  });
+
+  it("warns when hooks token reuses the gateway env token", async () => {
+    const prevToken = process.env.CLAWDBOT_GATEWAY_TOKEN;
+    process.env.CLAWDBOT_GATEWAY_TOKEN = "shared-gateway-token-1234567890";
+    const cfg: ClawdbotConfig = {
+      hooks: { enabled: true, token: "shared-gateway-token-1234567890" },
+    };
+
+    try {
+      const res = await runSecurityAudit({
+        config: cfg,
+        includeFilesystem: false,
+        includeChannelSecurity: false,
+      });
+
+      expect(res.findings).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ checkId: "hooks.token_reuse_gateway_token", severity: "warn" }),
+        ]),
+      );
+    } finally {
+      if (prevToken === undefined) delete process.env.CLAWDBOT_GATEWAY_TOKEN;
+      else process.env.CLAWDBOT_GATEWAY_TOKEN = prevToken;
+    }
   });
 
   it("warns when state/config look like a synced folder", async () => {

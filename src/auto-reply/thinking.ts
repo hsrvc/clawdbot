@@ -1,6 +1,8 @@
 export type ThinkLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 export type VerboseLevel = "off" | "on" | "full";
-export type ElevatedLevel = "off" | "on";
+export type NoticeLevel = "off" | "on" | "full";
+export type ElevatedLevel = "off" | "on" | "ask" | "full";
+export type ElevatedMode = "off" | "ask" | "full";
 export type ReasoningLevel = "off" | "on" | "stream";
 export type UsageDisplayLevel = "off" | "tokens" | "full";
 
@@ -92,6 +94,16 @@ export function normalizeVerboseLevel(raw?: string | null): VerboseLevel | undef
   return undefined;
 }
 
+// Normalize system notice flags used to toggle system notifications.
+export function normalizeNoticeLevel(raw?: string | null): NoticeLevel | undefined {
+  if (!raw) return undefined;
+  const key = raw.toLowerCase();
+  if (["off", "false", "no", "0"].includes(key)) return "off";
+  if (["full", "all", "everything"].includes(key)) return "full";
+  if (["on", "minimal", "true", "yes", "1"].includes(key)) return "on";
+  return undefined;
+}
+
 // Normalize response-usage display modes used to toggle per-response usage footers.
 export function normalizeUsageDisplay(raw?: string | null): UsageDisplayLevel | undefined {
   if (!raw) return undefined;
@@ -112,8 +124,16 @@ export function normalizeElevatedLevel(raw?: string | null): ElevatedLevel | und
   if (!raw) return undefined;
   const key = raw.toLowerCase();
   if (["off", "false", "no", "0"].includes(key)) return "off";
+  if (["full", "auto", "auto-approve", "autoapprove"].includes(key)) return "full";
+  if (["ask", "prompt", "approval", "approve"].includes(key)) return "ask";
   if (["on", "true", "yes", "1"].includes(key)) return "on";
   return undefined;
+}
+
+export function resolveElevatedMode(level?: ElevatedLevel | null): ElevatedMode {
+  if (!level || level === "off") return "off";
+  if (level === "full") return "full";
+  return "ask";
 }
 
 // Normalize reasoning visibility flags used to toggle reasoning exposure.

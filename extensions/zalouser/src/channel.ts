@@ -1,13 +1,19 @@
 import type {
   ChannelAccountSnapshot,
   ChannelDirectoryEntry,
+  ChannelDock,
+  ChannelGroupContext,
   ChannelPlugin,
   ClawdbotConfig,
+  GroupToolPolicyConfig,
 } from "clawdbot/plugin-sdk";
 import {
+  applyAccountNameToChannelSection,
+  buildChannelConfigSchema,
   DEFAULT_ACCOUNT_ID,
   deleteAccountFromConfigSection,
   formatPairingApproveHint,
+  migrateBaseNameToDefaultAccount,
   normalizeAccountId,
   setAccountEnabledInConfigSection,
 } from "clawdbot/plugin-sdk";
@@ -23,6 +29,9 @@ import { zalouserOnboardingAdapter } from "./onboarding.js";
 import { sendMessageZalouser } from "./send.js";
 import { checkZcaInstalled, parseJsonOutput, runZca, runZcaInteractive } from "./zca.js";
 import type { ZcaFriend, ZcaGroup, ZcaUserInfo } from "./types.js";
+import { ZalouserConfigSchema } from "./config-schema.js";
+import { collectZalouserStatusIssues } from "./status-issues.js";
+import { probeZalouser } from "./probe.js";
 
 const meta = {
   id: "zalouser",
@@ -72,6 +81,55 @@ function mapGroup(params: {
   };
 }
 
+function resolveZalouserGroupToolPolicy(
+  params: ChannelGroupContext,
+): GroupToolPolicyConfig | undefined {
+  const account = resolveZalouserAccountSync({
+    cfg: params.cfg as ClawdbotConfig,
+    accountId: params.accountId ?? undefined,
+  });
+  const groups = account.config.groups ?? {};
+  const groupId = params.groupId?.trim();
+  const groupChannel = params.groupChannel?.trim();
+  const candidates = [groupId, groupChannel, "*"].filter(
+    (value): value is string => Boolean(value),
+  );
+  for (const key of candidates) {
+    const entry = groups[key];
+    if (entry?.tools) return entry.tools;
+  }
+  return undefined;
+}
+
+export const zalouserDock: ChannelDock = {
+  id: "zalouser",
+  capabilities: {
+    chatTypes: ["direct", "group"],
+    media: true,
+    blockStreaming: true,
+  },
+  outbound: { textChunkLimit: 2000 },
+  config: {
+    resolveAllowFrom: ({ cfg, accountId }) =>
+      (resolveZalouserAccountSync({ cfg: cfg as ClawdbotConfig, accountId }).config.allowFrom ?? []).map(
+        (entry) => String(entry),
+      ),
+    formatAllowFrom: ({ allowFrom }) =>
+      allowFrom
+        .map((entry) => String(entry).trim())
+        .filter(Boolean)
+        .map((entry) => entry.replace(/^(zalouser|zlu):/i, ""))
+        .map((entry) => entry.toLowerCase()),
+  },
+  groups: {
+    resolveRequireMention: () => true,
+    resolveToolPolicy: resolveZalouserGroupToolPolicy,
+  },
+  threading: {
+    resolveReplyToMode: () => "off",
+  },
+};
+
 export const zalouserPlugin: ChannelPlugin<ResolvedZalouserAccount> = {
   id: "zalouser",
   meta,
@@ -86,6 +144,7 @@ export const zalouserPlugin: ChannelPlugin<ResolvedZalouserAccount> = {
     blockStreaming: true,
   },
   reload: { configPrefixes: ["channels.zalouser"] },
+  configSchema: buildChannelConfigSchema(ZalouserConfigSchema),
   config: {
     listAccountIds: (cfg) => listZalouserAccountIds(cfg as ClawdbotConfig),
     resolveAccount: (cfg, accountId) =>
@@ -152,9 +211,65 @@ export const zalouserPlugin: ChannelPlugin<ResolvedZalouserAccount> = {
   },
   groups: {
     resolveRequireMention: () => true,
+    resolveToolPolicy: resolveZalouserGroupToolPolicy,
   },
   threading: {
     resolveReplyToMode: () => "off",
+  },
+  setup: {
+    resolveAccountId: ({ accountId }) => normalizeAccountId(accountId),
+    applyAccountName: ({ cfg, accountId, name }) =>
+      applyAccountNameToChannelSection({
+        cfg: cfg as ClawdbotConfig,
+        channelKey: "zalouser",
+        accountId,
+        name,
+      }),
+    validateInput: () => null,
+    applyAccountConfig: ({ cfg, accountId, input }) => {
+      const namedConfig = applyAccountNameToChannelSection({
+        cfg: cfg as ClawdbotConfig,
+        channelKey: "zalouser",
+        accountId,
+        name: input.name,
+      });
+      const next =
+        accountId !== DEFAULT_ACCOUNT_ID
+          ? migrateBaseNameToDefaultAccount({
+              cfg: namedConfig,
+              channelKey: "zalouser",
+            })
+          : namedConfig;
+      if (accountId === DEFAULT_ACCOUNT_ID) {
+        return {
+          ...next,
+          channels: {
+            ...next.channels,
+            zalouser: {
+              ...next.channels?.zalouser,
+              enabled: true,
+            },
+          },
+        } as ClawdbotConfig;
+      }
+      return {
+        ...next,
+        channels: {
+          ...next.channels,
+          zalouser: {
+            ...next.channels?.zalouser,
+            enabled: true,
+            accounts: {
+              ...(next.channels?.zalouser?.accounts ?? {}),
+              [accountId]: {
+                ...(next.channels?.zalouser?.accounts?.[accountId] ?? {}),
+                enabled: true,
+              },
+            },
+          },
+        },
+      } as ClawdbotConfig;
+    },
   },
   messaging: {
     normalizeTarget: (raw) => {
@@ -391,6 +506,7 @@ export const zalouserPlugin: ChannelPlugin<ResolvedZalouserAccount> = {
       if (remaining.length) chunks.push(remaining);
       return chunks;
     },
+    chunkerMode: "text",
     textChunkLimit: 2000,
     sendText: async ({ to, text, accountId, cfg }) => {
       const account = resolveZalouserAccountSync({ cfg: cfg as ClawdbotConfig, accountId });
@@ -424,6 +540,7 @@ export const zalouserPlugin: ChannelPlugin<ResolvedZalouserAccount> = {
       lastStopAt: null,
       lastError: null,
     },
+    collectStatusIssues: collectZalouserStatusIssues,
     buildChannelSummary: ({ snapshot }) => ({
       configured: snapshot.configured ?? false,
       running: snapshot.running ?? false,
@@ -433,22 +550,12 @@ export const zalouserPlugin: ChannelPlugin<ResolvedZalouserAccount> = {
       probe: snapshot.probe,
       lastProbeAt: snapshot.lastProbeAt ?? null,
     }),
-    probeAccount: async ({ account, timeoutMs }) => {
-      const result = await runZca(["me", "info", "-j"], {
-        profile: account.profile,
-        timeout: timeoutMs,
-      });
-      if (!result.ok) {
-        return { ok: false, error: result.stderr };
-      }
-      try {
-        return { ok: true, user: JSON.parse(result.stdout) };
-      } catch {
-        return { ok: false, error: "Failed to parse user info" };
-      }
-    },
+    probeAccount: async ({ account, timeoutMs }) =>
+      probeZalouser(account.profile, timeoutMs),
     buildAccountSnapshot: async ({ account, runtime }) => {
-      const configured = await checkZcaAuthenticated(account.profile);
+      const zcaInstalled = await checkZcaInstalled();
+      const configured = zcaInstalled ? await checkZcaAuthenticated(account.profile) : false;
+      const configError = zcaInstalled ? "not authenticated" : "zca CLI not found in PATH";
       return {
         accountId: account.accountId,
         name: account.name,
@@ -457,7 +564,7 @@ export const zalouserPlugin: ChannelPlugin<ResolvedZalouserAccount> = {
         running: runtime?.running ?? false,
         lastStartAt: runtime?.lastStartAt ?? null,
         lastStopAt: runtime?.lastStopAt ?? null,
-        lastError: configured ? (runtime?.lastError ?? null) : "not configured",
+        lastError: configured ? (runtime?.lastError ?? null) : runtime?.lastError ?? configError,
         lastInboundAt: runtime?.lastInboundAt ?? null,
         lastOutboundAt: runtime?.lastOutboundAt ?? null,
         dmPolicy: account.config.dmPolicy ?? "pairing",

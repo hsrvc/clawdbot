@@ -6,6 +6,9 @@ import {
   resolveSystemNodeInfo,
 } from "../daemon/runtime-paths.js";
 import { buildServiceEnvironment } from "../daemon/service-env.js";
+import { formatCliCommand } from "../cli/command-format.js";
+import { collectConfigEnvVars } from "../config/env-vars.js";
+import type { ClawdbotConfig } from "../config/types.js";
 import type { GatewayDaemonRuntime } from "./daemon-runtime.js";
 
 type WarnFn = (message: string, title?: string) => void;
@@ -30,6 +33,8 @@ export async function buildGatewayInstallPlan(params: {
   devMode?: boolean;
   nodePath?: string;
   warn?: WarnFn;
+  /** Full config to extract env vars from (env vars + inline env keys). */
+  config?: ClawdbotConfig;
 }): Promise<GatewayInstallPlan> {
   const devMode = params.devMode ?? resolveGatewayDevMode();
   const nodePath =
@@ -49,7 +54,7 @@ export async function buildGatewayInstallPlan(params: {
     const warning = renderSystemNodeWarning(systemNode, programArguments[0]);
     if (warning) params.warn?.(warning, "Gateway runtime");
   }
-  const environment = buildServiceEnvironment({
+  const serviceEnvironment = buildServiceEnvironment({
     env: params.env,
     port: params.port,
     token: params.token,
@@ -59,11 +64,18 @@ export async function buildGatewayInstallPlan(params: {
         : undefined,
   });
 
+  // Merge config env vars into the service environment (vars + inline env keys).
+  // Config env vars are added first so service-specific vars take precedence.
+  const environment: Record<string, string | undefined> = {
+    ...collectConfigEnvVars(params.config),
+  };
+  Object.assign(environment, serviceEnvironment);
+
   return { programArguments, workingDirectory, environment };
 }
 
 export function gatewayInstallErrorHint(platform = process.platform): string {
   return platform === "win32"
-    ? "Tip: rerun from an elevated PowerShell (Start → type PowerShell → right-click → Run as administrator) or skip daemon install."
-    : "Tip: rerun `clawdbot daemon install` after fixing the error.";
+    ? "Tip: rerun from an elevated PowerShell (Start → type PowerShell → right-click → Run as administrator) or skip service install."
+    : `Tip: rerun \`${formatCliCommand("clawdbot gateway install")}\` after fixing the error.`;
 }

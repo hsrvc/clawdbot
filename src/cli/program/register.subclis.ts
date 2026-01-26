@@ -18,10 +18,8 @@ const shouldRegisterPrimaryOnly = (argv: string[]) => {
   return true;
 };
 
-const shouldEagerRegisterSubcommands = (argv: string[]) => {
-  if (isTruthyEnvValue(process.env.CLAWDBOT_DISABLE_LAZY_SUBCOMMANDS)) return true;
-  if (hasHelpOrVersion(argv)) return true;
-  return false;
+const shouldEagerRegisterSubcommands = (_argv: string[]) => {
+  return isTruthyEnvValue(process.env.CLAWDBOT_DISABLE_LAZY_SUBCOMMANDS);
 };
 
 const loadConfig = async (): Promise<ClawdbotConfig> => {
@@ -39,14 +37,6 @@ const entries: SubCliEntry[] = [
     },
   },
   {
-    name: "daemon",
-    description: "Manage the gateway daemon",
-    register: async (program) => {
-      const mod = await import("../daemon-cli.js");
-      mod.registerDaemonCli(program);
-    },
-  },
-  {
     name: "gateway",
     description: "Gateway control",
     register: async (program) => {
@@ -55,11 +45,11 @@ const entries: SubCliEntry[] = [
     },
   },
   {
-    name: "service",
-    description: "Service helpers",
+    name: "daemon",
+    description: "Gateway service (legacy alias)",
     register: async (program) => {
-      const mod = await import("../service-cli.js");
-      mod.registerServiceCli(program);
+      const mod = await import("../daemon-cli.js");
+      mod.registerDaemonCli(program);
     },
   },
   {
@@ -68,6 +58,14 @@ const entries: SubCliEntry[] = [
     register: async (program) => {
       const mod = await import("../logs-cli.js");
       mod.registerLogsCli(program);
+    },
+  },
+  {
+    name: "system",
+    description: "System events, heartbeat, and presence",
+    register: async (program) => {
+      const mod = await import("../system-cli.js");
+      mod.registerSystemCli(program);
     },
   },
   {
@@ -92,6 +90,14 @@ const entries: SubCliEntry[] = [
     register: async (program) => {
       const mod = await import("../nodes-cli.js");
       mod.registerNodesCli(program);
+    },
+  },
+  {
+    name: "devices",
+    description: "Device pairing + token management",
+    register: async (program) => {
+      const mod = await import("../devices-cli.js");
+      mod.registerDevicesCli(program);
     },
   },
   {
@@ -224,6 +230,15 @@ function removeCommand(program: Command, command: Command) {
   if (index >= 0) {
     commands.splice(index, 1);
   }
+}
+
+export async function registerSubCliByName(program: Command, name: string): Promise<boolean> {
+  const entry = entries.find((candidate) => candidate.name === name);
+  if (!entry) return false;
+  const existing = program.commands.find((cmd) => cmd.name() === entry.name);
+  if (existing) removeCommand(program, existing);
+  await entry.register(program);
+  return true;
 }
 
 function registerLazyCommand(program: Command, entry: SubCliEntry) {

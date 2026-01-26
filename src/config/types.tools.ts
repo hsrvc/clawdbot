@@ -102,6 +102,30 @@ export type MediaUnderstandingConfig = {
   models?: MediaUnderstandingModelConfig[];
 };
 
+export type LinkModelConfig = {
+  /** Use a CLI command for link processing. */
+  type?: "cli";
+  /** CLI binary (required when type=cli). */
+  command: string;
+  /** CLI args (template-enabled). */
+  args?: string[];
+  /** Optional timeout override (seconds) for this model entry. */
+  timeoutSeconds?: number;
+};
+
+export type LinkToolsConfig = {
+  /** Enable link understanding when models are configured. */
+  enabled?: boolean;
+  /** Optional scope gating for understanding. */
+  scope?: MediaUnderstandingScopeConfig;
+  /** Max number of links to process per message. */
+  maxLinks?: number;
+  /** Default timeout (seconds). */
+  timeoutSeconds?: number;
+  /** Ordered model list (fallbacks in order). */
+  models?: LinkModelConfig[];
+};
+
 export type MediaToolsConfig = {
   /** Shared model list applied across image/audio/video. */
   models?: MediaUnderstandingModelConfig[];
@@ -120,6 +144,11 @@ export type ToolPolicyConfig = {
   profile?: ToolProfileId;
 };
 
+export type GroupToolPolicyConfig = {
+  allow?: string[];
+  deny?: string[];
+};
+
 export type ExecToolConfig = {
   /** Exec host routing (default: sandbox). */
   host?: "sandbox" | "gateway" | "node";
@@ -131,10 +160,14 @@ export type ExecToolConfig = {
   node?: string;
   /** Directories to prepend to PATH when running exec (gateway/sandbox). */
   pathPrepend?: string[];
+  /** Safe stdin-only binaries that can run without allowlist entries. */
+  safeBins?: string[];
   /** Default time (ms) before an exec command auto-backgrounds. */
   backgroundMs?: number;
   /** Default timeout (seconds) before auto-killing exec commands. */
   timeoutSec?: number;
+  /** Emit a running notice (ms) when approval-backed exec runs long (default: 10000, 0 = off). */
+  approvalRunningNoticeMs?: number;
   /** How long to keep finished sessions in memory (ms). */
   cleanupMs?: number;
   /** Emit a system event and heartbeat when a backgrounded exec exits. */
@@ -244,6 +277,12 @@ export type MemorySearchConfig = {
     watch?: boolean;
     watchDebounceMs?: number;
     intervalMinutes?: number;
+    sessions?: {
+      /** Minimum appended bytes before session transcripts are reindexed. */
+      deltaBytes?: number;
+      /** Minimum appended JSONL lines before session transcripts are reindexed. */
+      deltaMessages?: number;
+    };
   };
   /** Query behavior. */
   query?: {
@@ -309,6 +348,8 @@ export type ToolsConfig = {
       timeoutSeconds?: number;
       /** Cache TTL in minutes for fetched content. */
       cacheTtlMinutes?: number;
+      /** Maximum number of redirects to follow (default: 3). */
+      maxRedirects?: number;
       /** Override User-Agent header for fetch requests. */
       userAgent?: string;
       /** Use Readability to extract main content (default: true). */
@@ -330,6 +371,7 @@ export type ToolsConfig = {
     };
   };
   media?: MediaToolsConfig;
+  links?: LinkToolsConfig;
   /** Message tool configuration. */
   message?: {
     /**

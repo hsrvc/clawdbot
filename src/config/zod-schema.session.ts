@@ -5,6 +5,7 @@ import {
   InboundDebounceSchema,
   NativeCommandsSettingSchema,
   QueueSchema,
+  TtsConfigSchema,
 } from "./zod-schema.core.js";
 
 const SessionResetConfigSchema = z
@@ -24,7 +25,6 @@ export const SessionSchema = z
     identityLinks: z.record(z.string(), z.array(z.string())).optional(),
     resetTriggers: z.array(z.string()).optional(),
     idleMinutes: z.number().int().positive().optional(),
-    heartbeatIdleMinutes: z.number().int().positive().optional(),
     reset: SessionResetConfigSchema.optional(),
     resetByType: z
       .object({
@@ -34,6 +34,7 @@ export const SessionSchema = z
       })
       .strict()
       .optional(),
+    resetByChannel: z.record(z.string(), SessionResetConfigSchema).optional(),
     store: z.string().optional(),
     typingIntervalSeconds: z.number().int().positive().optional(),
     typingMode: z
@@ -90,6 +91,7 @@ export const MessagesSchema = z
     ackReaction: z.string().optional(),
     ackReactionScope: z.enum(["group-mentions", "group-all", "direct", "all"]).optional(),
     removeAckAfterReply: z.boolean().optional(),
+    tts: TtsConfigSchema,
   })
   .strict()
   .optional();

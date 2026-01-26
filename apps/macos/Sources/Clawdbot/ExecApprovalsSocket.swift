@@ -13,6 +13,7 @@ struct ExecApprovalPromptRequest: Codable, Sendable {
     var ask: String?
     var agentId: String?
     var resolvedPath: String?
+    var sessionKey: String?
 }
 
 private struct ExecApprovalSocketRequest: Codable {
@@ -46,6 +47,7 @@ private struct ExecHostRequest: Codable {
     var needsScreenRecording: Bool?
     var agentId: String?
     var sessionKey: String?
+    var approvalDecision: ExecApprovalDecision?
 }
 
 private struct ExecHostRunResult: Codable {
@@ -87,16 +89,19 @@ enum ExecApprovalsSocketClient {
         let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPath.isEmpty, !trimmedToken.isEmpty else { return nil }
         do {
-            return try await AsyncTimeout.withTimeoutMs(timeoutMs: timeoutMs, onTimeout: {
-                TimeoutError(message: "exec approvals socket timeout")
-            }, operation: {
-                try await Task.detached {
-                    try self.requestDecisionSync(
-                        socketPath: trimmedPath,
-                        token: trimmedToken,
-                        request: request)
-                }.value
-            })
+            return try await AsyncTimeout.withTimeoutMs(
+                timeoutMs: timeoutMs,
+                onTimeout: {
+                    TimeoutError(message: "exec approvals socket timeout")
+                },
+                operation: {
+                    try await Task.detached {
+                        try self.requestDecisionSync(
+                            socketPath: trimmedPath,
+                            token: trimmedToken,
+                            request: request)
+                    }.value
+                })
         } catch {
             return nil
         }
@@ -211,36 +216,15 @@ enum ExecApprovalsPromptPresenter {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Allow this command?"
-
-        var details = "Clawdbot wants to run:\n\n\(request.command)"
-        let trimmedCwd = request.cwd?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !trimmedCwd.isEmpty {
-            details += "\n\nWorking directory:\n\(trimmedCwd)"
-        }
-        let trimmedAgent = request.agentId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !trimmedAgent.isEmpty {
-            details += "\n\nAgent:\n\(trimmedAgent)"
-        }
-        let trimmedPath = request.resolvedPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !trimmedPath.isEmpty {
-            details += "\n\nExecutable:\n\(trimmedPath)"
-        }
-        let trimmedHost = request.host?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !trimmedHost.isEmpty {
-            details += "\n\nHost:\n\(trimmedHost)"
-        }
-        if let security = request.security?.trimmingCharacters(in: .whitespacesAndNewlines), !security.isEmpty {
-            details += "\n\nSecurity:\n\(security)"
-        }
-        if let ask = request.ask?.trimmingCharacters(in: .whitespacesAndNewlines), !ask.isEmpty {
-            details += "\nAsk mode:\n\(ask)"
-        }
-        details += "\n\nThis runs on this machine."
-        alert.informativeText = details
+        alert.informativeText = "Review the command details before allowing."
+        alert.accessoryView = self.buildAccessoryView(request)
 
         alert.addButton(withTitle: "Allow Once")
         alert.addButton(withTitle: "Always Allow")
         alert.addButton(withTitle: "Don't Allow")
+        if #available(macOS 11.0, *), alert.buttons.indices.contains(2) {
+            alert.buttons[2].hasDestructiveAction = true
+        }
 
         switch alert.runModal() {
         case .alertFirstButtonReturn:
@@ -251,10 +235,128 @@ enum ExecApprovalsPromptPresenter {
             return .deny
         }
     }
+
+    @MainActor
+    private static func buildAccessoryView(_ request: ExecApprovalPromptRequest) -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.spacing = 8
+        stack.alignment = .leading
+
+        let commandTitle = NSTextField(labelWithString: "Command")
+        commandTitle.font = NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
+        stack.addArrangedSubview(commandTitle)
+
+        let commandText = NSTextView()
+        commandText.isEditable = false
+        commandText.isSelectable = true
+        commandText.drawsBackground = true
+        commandText.backgroundColor = NSColor.textBackgroundColor
+        commandText.font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        commandText.string = request.command
+        commandText.textContainerInset = NSSize(width: 6, height: 6)
+        commandText.textContainer?.lineFragmentPadding = 0
+        commandText.textContainer?.widthTracksTextView = true
+        commandText.isHorizontallyResizable = false
+        commandText.isVerticallyResizable = false
+
+        let commandScroll = NSScrollView()
+        commandScroll.borderType = .lineBorder
+        commandScroll.hasVerticalScroller = false
+        commandScroll.hasHorizontalScroller = false
+        commandScroll.documentView = commandText
+        commandScroll.translatesAutoresizingMaskIntoConstraints = false
+        commandScroll.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
+        commandScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 56).isActive = true
+        stack.addArrangedSubview(commandScroll)
+
+        let contextTitle = NSTextField(labelWithString: "Context")
+        contextTitle.font = NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
+        stack.addArrangedSubview(contextTitle)
+
+        let contextStack = NSStackView()
+        contextStack.orientation = .vertical
+        contextStack.spacing = 4
+        contextStack.alignment = .leading
+
+        let trimmedCwd = request.cwd?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedCwd.isEmpty {
+            self.addDetailRow(title: "Working directory", value: trimmedCwd, to: contextStack)
+        }
+        let trimmedAgent = request.agentId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedAgent.isEmpty {
+            self.addDetailRow(title: "Agent", value: trimmedAgent, to: contextStack)
+        }
+        let trimmedPath = request.resolvedPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedPath.isEmpty {
+            self.addDetailRow(title: "Executable", value: trimmedPath, to: contextStack)
+        }
+        let trimmedHost = request.host?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedHost.isEmpty {
+            self.addDetailRow(title: "Host", value: trimmedHost, to: contextStack)
+        }
+        if let security = request.security?.trimmingCharacters(in: .whitespacesAndNewlines), !security.isEmpty {
+            self.addDetailRow(title: "Security", value: security, to: contextStack)
+        }
+        if let ask = request.ask?.trimmingCharacters(in: .whitespacesAndNewlines), !ask.isEmpty {
+            self.addDetailRow(title: "Ask mode", value: ask, to: contextStack)
+        }
+
+        if contextStack.arrangedSubviews.isEmpty {
+            let empty = NSTextField(labelWithString: "No additional context provided.")
+            empty.textColor = NSColor.secondaryLabelColor
+            empty.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+            contextStack.addArrangedSubview(empty)
+        }
+
+        stack.addArrangedSubview(contextStack)
+
+        let footer = NSTextField(labelWithString: "This runs on this machine.")
+        footer.textColor = NSColor.secondaryLabelColor
+        footer.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        stack.addArrangedSubview(footer)
+
+        return stack
+    }
+
+    @MainActor
+    private static func addDetailRow(title: String, value: String, to stack: NSStackView) {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.spacing = 6
+        row.alignment = .firstBaseline
+
+        let titleLabel = NSTextField(labelWithString: "\(title):")
+        titleLabel.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        titleLabel.textColor = NSColor.secondaryLabelColor
+
+        let valueLabel = NSTextField(labelWithString: value)
+        valueLabel.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        valueLabel.lineBreakMode = .byTruncatingMiddle
+        valueLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        row.addArrangedSubview(titleLabel)
+        row.addArrangedSubview(valueLabel)
+        stack.addArrangedSubview(row)
+    }
 }
 
 @MainActor
 private enum ExecHostExecutor {
+    private struct ExecApprovalContext {
+        let command: [String]
+        let displayCommand: String
+        let trimmedAgent: String?
+        let approvals: ExecApprovalsResolved
+        let security: ExecSecurity
+        let ask: ExecAsk
+        let autoAllowSkills: Bool
+        let env: [String: String]?
+        let resolution: ExecCommandResolution?
+        let allowlistMatch: ExecAllowlistEntry?
+        let skillAllow: Bool
+    }
+
     private static let blockedEnvKeys: Set<String> = [
         "PATH",
         "NODE_OPTIONS",
@@ -273,14 +375,94 @@ private enum ExecHostExecutor {
     static func handle(_ request: ExecHostRequest) async -> ExecHostResponse {
         let command = request.command.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         guard !command.isEmpty else {
-            return ExecHostResponse(
-                type: "exec-res",
-                id: UUID().uuidString,
-                ok: false,
-                payload: nil,
-                error: ExecHostError(code: "INVALID_REQUEST", message: "command required", reason: "invalid"))
+            return self.errorResponse(
+                code: "INVALID_REQUEST",
+                message: "command required",
+                reason: "invalid")
         }
 
+        let context = await self.buildContext(request: request, command: command)
+        if context.security == .deny {
+            return self.errorResponse(
+                code: "UNAVAILABLE",
+                message: "SYSTEM_RUN_DISABLED: security=deny",
+                reason: "security=deny")
+        }
+
+        let approvalDecision = request.approvalDecision
+        if approvalDecision == .deny {
+            return self.errorResponse(
+                code: "UNAVAILABLE",
+                message: "SYSTEM_RUN_DENIED: user denied",
+                reason: "user-denied")
+        }
+
+        var approvedByAsk = approvalDecision != nil
+        if ExecApprovalHelpers.requiresAsk(
+            ask: context.ask,
+            security: context.security,
+            allowlistMatch: context.allowlistMatch,
+            skillAllow: context.skillAllow),
+            approvalDecision == nil
+        {
+            let decision = ExecApprovalsPromptPresenter.prompt(
+                ExecApprovalPromptRequest(
+                    command: context.displayCommand,
+                    cwd: request.cwd,
+                    host: "node",
+                    security: context.security.rawValue,
+                    ask: context.ask.rawValue,
+                    agentId: context.trimmedAgent,
+                    resolvedPath: context.resolution?.resolvedPath,
+                    sessionKey: request.sessionKey))
+
+            switch decision {
+            case .deny:
+                return self.errorResponse(
+                    code: "UNAVAILABLE",
+                    message: "SYSTEM_RUN_DENIED: user denied",
+                    reason: "user-denied")
+            case .allowAlways:
+                approvedByAsk = true
+                self.persistAllowlistEntry(decision: decision, context: context)
+            case .allowOnce:
+                approvedByAsk = true
+            }
+        }
+
+        self.persistAllowlistEntry(decision: approvalDecision, context: context)
+
+        if context.security == .allowlist,
+           context.allowlistMatch == nil,
+           !context.skillAllow,
+           !approvedByAsk
+        {
+            return self.errorResponse(
+                code: "UNAVAILABLE",
+                message: "SYSTEM_RUN_DENIED: allowlist miss",
+                reason: "allowlist-miss")
+        }
+
+        if let match = context.allowlistMatch {
+            ExecApprovalsStore.recordAllowlistUse(
+                agentId: context.trimmedAgent,
+                pattern: match.pattern,
+                command: context.displayCommand,
+                resolvedPath: context.resolution?.resolvedPath)
+        }
+
+        if let errorResponse = await self.ensureScreenRecordingAccess(request.needsScreenRecording) {
+            return errorResponse
+        }
+
+        return await self.runCommand(
+            command: command,
+            cwd: request.cwd,
+            env: context.env,
+            timeoutMs: request.timeoutMs)
+    }
+
+    private static func buildContext(request: ExecHostRequest, command: [String]) async -> ExecApprovalContext {
         let displayCommand = ExecCommandFormatter.displayString(
             for: command,
             rawCommand: request.rawCommand)
@@ -306,102 +488,56 @@ private enum ExecHostExecutor {
         } else {
             skillAllow = false
         }
+        return ExecApprovalContext(
+            command: command,
+            displayCommand: displayCommand,
+            trimmedAgent: trimmedAgent,
+            approvals: approvals,
+            security: security,
+            ask: ask,
+            autoAllowSkills: autoAllowSkills,
+            env: env,
+            resolution: resolution,
+            allowlistMatch: allowlistMatch,
+            skillAllow: skillAllow)
+    }
 
-        if security == .deny {
-            return ExecHostResponse(
-                type: "exec-res",
-                id: UUID().uuidString,
-                ok: false,
-                payload: nil,
-                error: ExecHostError(
-                    code: "UNAVAILABLE",
-                    message: "SYSTEM_RUN_DISABLED: security=deny",
-                    reason: "security=deny"))
+    private static func persistAllowlistEntry(
+        decision: ExecApprovalDecision?,
+        context: ExecApprovalContext)
+    {
+        guard decision == .allowAlways, context.security == .allowlist else { return }
+        guard let pattern = ExecApprovalHelpers.allowlistPattern(
+            command: context.command,
+            resolution: context.resolution)
+        else {
+            return
         }
+        ExecApprovalsStore.addAllowlistEntry(agentId: context.trimmedAgent, pattern: pattern)
+    }
 
-        let requiresAsk: Bool = {
-            if ask == .always { return true }
-            if ask == .onMiss, security == .allowlist, allowlistMatch == nil, !skillAllow { return true }
-            return false
-        }()
+    private static func ensureScreenRecordingAccess(_ needsScreenRecording: Bool?) async -> ExecHostResponse? {
+        guard needsScreenRecording == true else { return nil }
+        let authorized = await PermissionManager
+            .status([.screenRecording])[.screenRecording] ?? false
+        if authorized { return nil }
+        return self.errorResponse(
+            code: "UNAVAILABLE",
+            message: "PERMISSION_MISSING: screenRecording",
+            reason: "permission:screenRecording")
+    }
 
-        var approvedByAsk = false
-        if requiresAsk {
-            let decision = ExecApprovalsPromptPresenter.prompt(
-                ExecApprovalPromptRequest(
-                    command: displayCommand,
-                    cwd: request.cwd,
-                    host: "node",
-                    security: security.rawValue,
-                    ask: ask.rawValue,
-                    agentId: trimmedAgent,
-                    resolvedPath: resolution?.resolvedPath))
-
-            switch decision {
-            case .deny:
-                return ExecHostResponse(
-                    type: "exec-res",
-                    id: UUID().uuidString,
-                    ok: false,
-                    payload: nil,
-                    error: ExecHostError(
-                        code: "UNAVAILABLE",
-                        message: "SYSTEM_RUN_DENIED: user denied",
-                        reason: "user-denied"))
-            case .allowAlways:
-                approvedByAsk = true
-                if security == .allowlist {
-                    let pattern = resolution?.resolvedPath ?? resolution?.rawExecutable ?? command.first ?? ""
-                    if !pattern.isEmpty {
-                        ExecApprovalsStore.addAllowlistEntry(agentId: trimmedAgent, pattern: pattern)
-                    }
-                }
-            case .allowOnce:
-                approvedByAsk = true
-            }
-        }
-
-        if security == .allowlist, allowlistMatch == nil, !skillAllow, !approvedByAsk {
-            return ExecHostResponse(
-                type: "exec-res",
-                id: UUID().uuidString,
-                ok: false,
-                payload: nil,
-                error: ExecHostError(
-                    code: "UNAVAILABLE",
-                    message: "SYSTEM_RUN_DENIED: allowlist miss",
-                    reason: "allowlist-miss"))
-        }
-
-        if let match = allowlistMatch {
-            ExecApprovalsStore.recordAllowlistUse(
-                agentId: trimmedAgent,
-                pattern: match.pattern,
-                command: displayCommand,
-                resolvedPath: resolution?.resolvedPath)
-        }
-
-        if request.needsScreenRecording == true {
-            let authorized = await PermissionManager
-                .status([.screenRecording])[.screenRecording] ?? false
-            if !authorized {
-                return ExecHostResponse(
-                    type: "exec-res",
-                    id: UUID().uuidString,
-                    ok: false,
-                    payload: nil,
-                    error: ExecHostError(
-                        code: "UNAVAILABLE",
-                        message: "PERMISSION_MISSING: screenRecording",
-                        reason: "permission:screenRecording"))
-            }
-        }
-
-        let timeoutSec = request.timeoutMs.flatMap { Double($0) / 1000.0 }
+    private static func runCommand(
+        command: [String],
+        cwd: String?,
+        env: [String: String]?,
+        timeoutMs: Int?) async -> ExecHostResponse
+    {
+        let timeoutSec = timeoutMs.flatMap { Double($0) / 1000.0 }
         let result = await Task.detached { () -> ShellExecutor.ShellResult in
             await ShellExecutor.runDetailed(
                 command: command,
-                cwd: request.cwd,
+                cwd: cwd,
                 env: env,
                 timeout: timeoutSec)
         }.value
@@ -412,7 +548,24 @@ private enum ExecHostExecutor {
             stdout: result.stdout,
             stderr: result.stderr,
             error: result.errorMessage)
-        return ExecHostResponse(
+        return self.successResponse(payload)
+    }
+
+    private static func errorResponse(
+        code: String,
+        message: String,
+        reason: String?) -> ExecHostResponse
+    {
+        ExecHostResponse(
+            type: "exec-res",
+            id: UUID().uuidString,
+            ok: false,
+            payload: nil,
+            error: ExecHostError(code: code, message: message, reason: reason))
+    }
+
+    private static func successResponse(_ payload: ExecHostRunResult) -> ExecHostResponse {
+        ExecHostResponse(
             type: "exec-res",
             id: UUID().uuidString,
             ok: true,

@@ -5,7 +5,7 @@ read_when:
 ---
 # Gateway architecture
 
-Last updated: 2026-01-19
+Last updated: 2026-01-22
 
 ## Overview
 
@@ -34,7 +34,8 @@ Last updated: 2026-01-19
 
 ### Nodes (macOS / iOS / Android / headless)
 - Connect to the **same WS server** with `role: node`.
-- Pair with the Gateway to receive a token.
+- Provide a device identity in `connect`; pairing is **device‑based** (role `node`) and
+  approval lives in the device pairing store.
 - Expose commands like `canvas.*`, `camera.*`, `screen.record`, `location.get`.
 
 Protocol details:
@@ -76,6 +77,21 @@ Client                    Gateway
 - Idempotency keys are required for side‑effecting methods (`send`, `agent`) to
   safely retry; the server keeps a short‑lived dedupe cache.
 - Nodes must include `role: "node"` plus caps/commands/permissions in `connect`.
+
+## Pairing + local trust
+
+- All WS clients (operators + nodes) include a **device identity** on `connect`.
+- New device IDs require pairing approval; the Gateway issues a **device token**
+  for subsequent connects.
+- **Local** connects (loopback or the gateway host’s own tailnet address) can be
+  auto‑approved to keep same‑host UX smooth.
+- **Non‑local** connects must sign the `connect.challenge` nonce and require
+  explicit approval.
+- Gateway auth (`gateway.auth.*`) still applies to **all** connections, local or
+  remote.
+
+Details: [Gateway protocol](/gateway/protocol), [Pairing](/start/pairing),
+[Security](/gateway/security).
 
 ## Protocol typing and codegen
 

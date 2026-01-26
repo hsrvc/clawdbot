@@ -1,10 +1,31 @@
 import { z } from "zod";
 import { ToolsSchema } from "./zod-schema.agent-runtime.js";
+import { ApprovalsSchema } from "./zod-schema.approvals.js";
 import { AgentsSchema, AudioSchema, BindingsSchema, BroadcastSchema } from "./zod-schema.agents.js";
 import { HexColorSchema, ModelsConfigSchema } from "./zod-schema.core.js";
 import { HookMappingSchema, HooksGmailSchema, InternalHooksSchema } from "./zod-schema.hooks.js";
 import { ChannelsSchema } from "./zod-schema.providers.js";
 import { CommandsSchema, MessagesSchema, SessionSchema } from "./zod-schema.session.js";
+
+const BrowserSnapshotDefaultsSchema = z
+  .object({
+    mode: z.literal("efficient").optional(),
+  })
+  .strict()
+  .optional();
+
+const NodeHostSchema = z
+  .object({
+    browserProxy: z
+      .object({
+        enabled: z.boolean().optional(),
+        allowProfiles: z.array(z.string()).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .optional();
 
 export const ClawdbotSchema = z
   .object({
@@ -35,6 +56,38 @@ export const ClawdbotSchema = z
         lastRunCommit: z.string().optional(),
         lastRunCommand: z.string().optional(),
         lastRunMode: z.union([z.literal("local"), z.literal("remote")]).optional(),
+      })
+      .strict()
+      .optional(),
+    diagnostics: z
+      .object({
+        enabled: z.boolean().optional(),
+        flags: z.array(z.string()).optional(),
+        otel: z
+          .object({
+            enabled: z.boolean().optional(),
+            endpoint: z.string().optional(),
+            protocol: z.union([z.literal("http/protobuf"), z.literal("grpc")]).optional(),
+            headers: z.record(z.string(), z.string()).optional(),
+            serviceName: z.string().optional(),
+            traces: z.boolean().optional(),
+            metrics: z.boolean().optional(),
+            logs: z.boolean().optional(),
+            sampleRate: z.number().min(0).max(1).optional(),
+            flushIntervalMs: z.number().int().nonnegative().optional(),
+          })
+          .strict()
+          .optional(),
+        cacheTrace: z
+          .object({
+            enabled: z.boolean().optional(),
+            filePath: z.string().optional(),
+            includeMessages: z.boolean().optional(),
+            includePrompt: z.boolean().optional(),
+            includeSystem: z.boolean().optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),
@@ -73,7 +126,7 @@ export const ClawdbotSchema = z
       .optional(),
     update: z
       .object({
-        channel: z.union([z.literal("stable"), z.literal("beta")]).optional(),
+        channel: z.union([z.literal("stable"), z.literal("beta"), z.literal("dev")]).optional(),
         checkOnStart: z.boolean().optional(),
       })
       .strict()
@@ -92,6 +145,7 @@ export const ClawdbotSchema = z
         noSandbox: z.boolean().optional(),
         attachOnly: z.boolean().optional(),
         defaultProfile: z.string().optional(),
+        snapshotDefaults: BrowserSnapshotDefaultsSchema,
         profiles: z
           .record(
             z
@@ -116,6 +170,13 @@ export const ClawdbotSchema = z
     ui: z
       .object({
         seamColor: HexColorSchema.optional(),
+        assistant: z
+          .object({
+            name: z.string().max(50).optional(),
+            avatar: z.string().max(200).optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),
@@ -147,13 +208,21 @@ export const ClawdbotSchema = z
       .strict()
       .optional(),
     models: ModelsConfigSchema,
+    nodeHost: NodeHostSchema,
     agents: AgentsSchema,
     tools: ToolsSchema,
     bindings: BindingsSchema,
     broadcast: BroadcastSchema,
     audio: AudioSchema,
+    media: z
+      .object({
+        preserveFilenames: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
     messages: MessagesSchema,
     commands: CommandsSchema,
+    approvals: ApprovalsSchema,
     session: SessionSchema,
     cron: z
       .object({
@@ -203,6 +272,12 @@ export const ClawdbotSchema = z
           })
           .strict()
           .optional(),
+        mdns: z
+          .object({
+            mode: z.enum(["off", "minimal", "full"]).optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),
@@ -231,12 +306,19 @@ export const ClawdbotSchema = z
         port: z.number().int().positive().optional(),
         mode: z.union([z.literal("local"), z.literal("remote")]).optional(),
         bind: z
-          .union([z.literal("auto"), z.literal("lan"), z.literal("loopback"), z.literal("custom")])
+          .union([
+            z.literal("auto"),
+            z.literal("lan"),
+            z.literal("loopback"),
+            z.literal("custom"),
+            z.literal("tailnet"),
+          ])
           .optional(),
         controlUi: z
           .object({
             enabled: z.boolean().optional(),
             basePath: z.string().optional(),
+            allowInsecureAuth: z.boolean().optional(),
           })
           .strict()
           .optional(),
@@ -249,6 +331,7 @@ export const ClawdbotSchema = z
           })
           .strict()
           .optional(),
+        trustedProxies: z.array(z.string()).optional(),
         tailscale: z
           .object({
             mode: z.union([z.literal("off"), z.literal("serve"), z.literal("funnel")]).optional(),
@@ -259,8 +342,10 @@ export const ClawdbotSchema = z
         remote: z
           .object({
             url: z.string().optional(),
+            transport: z.union([z.literal("ssh"), z.literal("direct")]).optional(),
             token: z.string().optional(),
             password: z.string().optional(),
+            tlsFingerprint: z.string().optional(),
             sshTarget: z.string().optional(),
             sshIdentity: z.string().optional(),
           })
@@ -299,9 +384,61 @@ export const ClawdbotSchema = z
                   })
                   .strict()
                   .optional(),
+                responses: z
+                  .object({
+                    enabled: z.boolean().optional(),
+                    maxBodyBytes: z.number().int().positive().optional(),
+                    files: z
+                      .object({
+                        allowUrl: z.boolean().optional(),
+                        allowedMimes: z.array(z.string()).optional(),
+                        maxBytes: z.number().int().positive().optional(),
+                        maxChars: z.number().int().positive().optional(),
+                        maxRedirects: z.number().int().nonnegative().optional(),
+                        timeoutMs: z.number().int().positive().optional(),
+                        pdf: z
+                          .object({
+                            maxPages: z.number().int().positive().optional(),
+                            maxPixels: z.number().int().positive().optional(),
+                            minTextChars: z.number().int().nonnegative().optional(),
+                          })
+                          .strict()
+                          .optional(),
+                      })
+                      .strict()
+                      .optional(),
+                    images: z
+                      .object({
+                        allowUrl: z.boolean().optional(),
+                        allowedMimes: z.array(z.string()).optional(),
+                        maxBytes: z.number().int().positive().optional(),
+                        maxRedirects: z.number().int().nonnegative().optional(),
+                        timeoutMs: z.number().int().positive().optional(),
+                      })
+                      .strict()
+                      .optional(),
+                  })
+                  .strict()
+                  .optional(),
               })
               .strict()
               .optional(),
+          })
+          .strict()
+          .optional(),
+        nodes: z
+          .object({
+            browser: z
+              .object({
+                mode: z
+                  .union([z.literal("auto"), z.literal("manual"), z.literal("off")])
+                  .optional(),
+                node: z.string().optional(),
+              })
+              .strict()
+              .optional(),
+            allowCommands: z.array(z.string()).optional(),
+            denyCommands: z.array(z.string()).optional(),
           })
           .strict()
           .optional(),
@@ -336,6 +473,7 @@ export const ClawdbotSchema = z
                 enabled: z.boolean().optional(),
                 apiKey: z.string().optional(),
                 env: z.record(z.string(), z.string()).optional(),
+                config: z.record(z.string(), z.unknown()).optional(),
               })
               .strict(),
           )

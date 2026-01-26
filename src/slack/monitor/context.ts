@@ -8,6 +8,7 @@ import { createDedupeCache } from "../../infra/dedupe.js";
 import { getChildLogger } from "../../logging.js";
 import type { RuntimeEnv } from "../../runtime.js";
 import type { SlackMessageEvent } from "../types.js";
+import { formatAllowlistMatchMeta } from "../../channels/allowlist-match.js";
 
 import { normalizeAllowList, normalizeAllowListLower, normalizeSlackSlug } from "./allow-list.js";
 import { resolveSlackChannelConfig } from "./channel-config.js";
@@ -310,9 +311,7 @@ export function createSlackMonitorContext(params: {
         channels: params.channelsConfig,
         defaultRequireMention,
       });
-      const channelMatchMeta = `matchKey=${channelConfig?.matchKey ?? "none"} matchSource=${
-        channelConfig?.matchSource ?? "none"
-      }`;
+      const channelMatchMeta = formatAllowlistMatchMeta(channelConfig);
       const channelAllowed = channelConfig?.allowed !== false;
       const channelAllowlistConfigured =
         Boolean(params.channelsConfig) && Object.keys(params.channelsConfig ?? {}).length > 0;
@@ -328,7 +327,11 @@ export function createSlackMonitorContext(params: {
         );
         return false;
       }
-      if (!channelAllowed) {
+      // When groupPolicy is "open", only block channels that are EXPLICITLY denied
+      // (i.e., have a matching config entry with allow:false). Channels not in the
+      // config (matchSource undefined) should be allowed under open policy.
+      const hasExplicitConfig = Boolean(channelConfig?.matchSource);
+      if (!channelAllowed && (params.groupPolicy !== "open" || hasExplicitConfig)) {
         logVerbose(`slack: drop channel ${p.channelId} (${channelMatchMeta})`);
         return false;
       }

@@ -15,6 +15,7 @@ import { DuplicateAgentDirError, findDuplicateAgentDirs } from "./agent-dirs.js"
 import {
   applyCompactionDefaults,
   applyContextPruningDefaults,
+  applyAgentDefaults,
   applyLoggingDefaults,
   applyMessageDefaults,
   applyModelDefaults,
@@ -23,14 +24,14 @@ import {
 } from "./defaults.js";
 import { VERSION } from "../version.js";
 import { MissingEnvVarError, resolveConfigEnvVars } from "./env-substitution.js";
+import { collectConfigEnvVars } from "./env-vars.js";
 import { ConfigIncludeError, resolveConfigIncludes } from "./includes.js";
 import { findLegacyConfigIssues } from "./legacy.js";
 import { normalizeConfigPaths } from "./normalize-paths.js";
 import { resolveConfigPath, resolveStateDir } from "./paths.js";
 import { applyConfigOverrides } from "./runtime-overrides.js";
 import type { ClawdbotConfig, ConfigFileSnapshot, LegacyConfigIssue } from "./types.js";
-import { validateConfigObject } from "./validation.js";
-import { ClawdbotSchema } from "./zod-schema.js";
+import { validateConfigObjectWithPlugins } from "./validation.js";
 import { compareClawdbotVersions } from "./version.js";
 
 // Re-export for backwards compatibility
@@ -57,6 +58,7 @@ const SHELL_ENV_EXPECTED_KEYS = [
 ];
 
 const CONFIG_BACKUP_COUNT = 5;
+const loggedInvalidConfigs = new Set<string>();
 
 export type ParseConfigJson5Result = { ok: true; parsed: unknown } | { ok: false; error: string };
 
@@ -148,24 +150,7 @@ function warnIfConfigFromFuture(cfg: ClawdbotConfig, logger: Pick<typeof console
 }
 
 function applyConfigEnv(cfg: ClawdbotConfig, env: NodeJS.ProcessEnv): void {
-  const envConfig = cfg.env;
-  if (!envConfig) return;
-
-  const entries: Record<string, string> = {};
-
-  if (envConfig.vars) {
-    for (const [key, value] of Object.entries(envConfig.vars)) {
-      if (!value) continue;
-      entries[key] = value;
-    }
-  }
-
-  for (const [key, value] of Object.entries(envConfig)) {
-    if (key === "shellEnv" || key === "vars") continue;
-    if (typeof value !== "string" || !value.trim()) continue;
-    entries[key] = value;
-  }
-
+  const entries = collectConfigEnvVars(cfg);
   for (const [key, value] of Object.entries(entries)) {
     if (env[key]?.trim()) continue;
     env[key] = value;
@@ -226,26 +211,50 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
         parseJson: (raw) => deps.json5.parse(raw),
       });
 
+      // Apply config.env to process.env BEFORE substitution so ${VAR} can reference config-defined vars
+      if (resolved && typeof resolved === "object" && "env" in resolved) {
+        applyConfigEnv(resolved as ClawdbotConfig, deps.env);
+      }
+
       // Substitute ${VAR} env var references
       const substituted = resolveConfigEnvVars(resolved, deps.env);
 
       const resolvedConfig = substituted;
       warnOnConfigMiskeys(resolvedConfig, deps.logger);
       if (typeof resolvedConfig !== "object" || resolvedConfig === null) return {};
-      const validated = ClawdbotSchema.safeParse(resolvedConfig);
-      if (!validated.success) {
-        deps.logger.error("Invalid config:");
-        for (const iss of validated.error.issues) {
-          deps.logger.error(`- ${iss.path.join(".")}: ${iss.message}`);
-        }
-        return {};
+      const preValidationDuplicates = findDuplicateAgentDirs(resolvedConfig as ClawdbotConfig, {
+        env: deps.env,
+        homedir: deps.homedir,
+      });
+      if (preValidationDuplicates.length > 0) {
+        throw new DuplicateAgentDirError(preValidationDuplicates);
       }
-      warnIfConfigFromFuture(validated.data as ClawdbotConfig, deps.logger);
+      const validated = validateConfigObjectWithPlugins(resolvedConfig);
+      if (!validated.ok) {
+        const details = validated.issues
+          .map((iss) => `- ${iss.path || "<root>"}: ${iss.message}`)
+          .join("\n");
+        if (!loggedInvalidConfigs.has(configPath)) {
+          loggedInvalidConfigs.add(configPath);
+          deps.logger.error(`Invalid config at ${configPath}:\\n${details}`);
+        }
+        const error = new Error("Invalid config");
+        (error as { code?: string; details?: string }).code = "INVALID_CONFIG";
+        (error as { code?: string; details?: string }).details = details;
+        throw error;
+      }
+      if (validated.warnings.length > 0) {
+        const details = validated.warnings
+          .map((iss) => `- ${iss.path || "<root>"}: ${iss.message}`)
+          .join("\n");
+        deps.logger.warn(`Config warnings:\\n${details}`);
+      }
+      warnIfConfigFromFuture(validated.config, deps.logger);
       const cfg = applyModelDefaults(
         applyCompactionDefaults(
           applyContextPruningDefaults(
-            applySessionDefaults(
-              applyLoggingDefaults(applyMessageDefaults(validated.data as ClawdbotConfig)),
+            applyAgentDefaults(
+              applySessionDefaults(applyLoggingDefaults(applyMessageDefaults(validated.config))),
             ),
           ),
         ),
@@ -279,6 +288,10 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
         deps.logger.error(err.message);
         throw err;
       }
+      const error = err as { code?: string };
+      if (error?.code === "INVALID_CONFIG") {
+        return {};
+      }
       deps.logger.error(`Failed to read config at ${configPath}`, err);
       return {};
     }
@@ -291,7 +304,9 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
       const config = applyTalkApiKey(
         applyModelDefaults(
           applyCompactionDefaults(
-            applyContextPruningDefaults(applySessionDefaults(applyMessageDefaults({}))),
+            applyContextPruningDefaults(
+              applyAgentDefaults(applySessionDefaults(applyMessageDefaults({}))),
+            ),
           ),
         ),
       );
@@ -305,6 +320,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
         config,
         hash,
         issues: [],
+        warnings: [],
         legacyIssues,
       };
     }
@@ -323,6 +339,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
           config: {},
           hash,
           issues: [{ path: "", message: `JSON5 parse failed: ${parsedRes.error}` }],
+          warnings: [],
           legacyIssues: [],
         };
       }
@@ -348,8 +365,14 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
           config: coerceConfig(parsedRes.parsed),
           hash,
           issues: [{ path: "", message }],
+          warnings: [],
           legacyIssues: [],
         };
+      }
+
+      // Apply config.env to process.env BEFORE substitution so ${VAR} can reference config-defined vars
+      if (resolved && typeof resolved === "object" && "env" in resolved) {
+        applyConfigEnv(resolved as ClawdbotConfig, deps.env);
       }
 
       // Substitute ${VAR} env var references
@@ -370,6 +393,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
           config: coerceConfig(resolved),
           hash,
           issues: [{ path: "", message }],
+          warnings: [],
           legacyIssues: [],
         };
       }
@@ -377,7 +401,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
       const resolvedConfigRaw = substituted;
       const legacyIssues = findLegacyConfigIssues(resolvedConfigRaw);
 
-      const validated = validateConfigObject(resolvedConfigRaw);
+      const validated = validateConfigObjectWithPlugins(resolvedConfigRaw);
       if (!validated.ok) {
         return {
           path: configPath,
@@ -388,6 +412,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
           config: coerceConfig(resolvedConfigRaw),
           hash,
           issues: validated.issues,
+          warnings: validated.warnings,
           legacyIssues,
         };
       }
@@ -402,12 +427,15 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
         config: normalizeConfigPaths(
           applyTalkApiKey(
             applyModelDefaults(
-              applySessionDefaults(applyLoggingDefaults(applyMessageDefaults(validated.config))),
+              applyAgentDefaults(
+                applySessionDefaults(applyLoggingDefaults(applyMessageDefaults(validated.config))),
+              ),
             ),
           ),
         ),
         hash,
         issues: [],
+        warnings: validated.warnings,
         legacyIssues,
       };
     } catch (err) {
@@ -420,6 +448,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
         config: {},
         hash: hashConfigRaw(null),
         issues: [{ path: "", message: `read failed: ${String(err)}` }],
+        warnings: [],
         legacyIssues: [],
       };
     }
@@ -427,6 +456,18 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
 
   async function writeConfigFile(cfg: ClawdbotConfig) {
     clearConfigCache();
+    const validated = validateConfigObjectWithPlugins(cfg);
+    if (!validated.ok) {
+      const issue = validated.issues[0];
+      const pathLabel = issue?.path ? issue.path : "<root>";
+      throw new Error(`Config validation failed: ${pathLabel}: ${issue?.message ?? "invalid"}`);
+    }
+    if (validated.warnings.length > 0) {
+      const details = validated.warnings
+        .map((warning) => `- ${warning.path}: ${warning.message}`)
+        .join("\n");
+      deps.logger.warn(`Config warnings:\n${details}`);
+    }
     const dir = path.dirname(configPath);
     await deps.fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
     const json = JSON.stringify(applyModelDefaults(stampConfigVersion(cfg)), null, 2)

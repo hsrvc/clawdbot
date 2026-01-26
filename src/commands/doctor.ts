@@ -1,3 +1,5 @@
+import fs from "node:fs";
+
 import { intro as clackIntro, outro as clackOutro } from "@clack/prompts";
 import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../agents/defaults.js";
@@ -7,15 +9,19 @@ import {
   resolveConfiguredModelRef,
   resolveHooksGmailModel,
 } from "../agents/model-selection.js";
+import { formatCliCommand } from "../cli/command-format.js";
 import type { ClawdbotConfig } from "../config/config.js";
-import { CONFIG_PATH_CLAWDBOT, writeConfigFile } from "../config/config.js";
+import { CONFIG_PATH_CLAWDBOT, readConfigFileSnapshot, writeConfigFile } from "../config/config.js";
+import { logConfigUpdated } from "../config/logging.js";
 import { resolveGatewayService } from "../daemon/service.js";
+import { resolveGatewayAuth } from "../gateway/auth.js";
 import { buildGatewayConnectionDetails } from "../gateway/call.js";
 import { resolveClawdbotPackageRoot } from "../infra/clawdbot-root.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { defaultRuntime } from "../runtime.js";
 import { note } from "../terminal/note.js";
 import { stylePromptTitle } from "../terminal/prompt-style.js";
+import { shortenHomePath } from "../utils.js";
 import { maybeRepairAnthropicOAuthProfileId, noteAuthProfileHealth } from "./doctor-auth.js";
 import { loadAndMaybeMigrateDoctorConfig } from "./doctor-config-flow.js";
 import { maybeRepairGatewayDaemon } from "./doctor-gateway-daemon-flow.js";
@@ -84,6 +90,19 @@ export async function doctorCommand(
   });
   let cfg: ClawdbotConfig = configResult.cfg;
 
+  const configPath = configResult.path ?? CONFIG_PATH_CLAWDBOT;
+  if (!cfg.gateway?.mode) {
+    const lines = [
+      "gateway.mode is unset; gateway start will be blocked.",
+      `Fix: run ${formatCliCommand("clawdbot configure")} and set Gateway mode (local/remote).`,
+      `Or set directly: ${formatCliCommand("clawdbot config set gateway.mode local")}`,
+    ];
+    if (!fs.existsSync(configPath)) {
+      lines.push(`Missing config: run ${formatCliCommand("clawdbot setup")} first.`);
+    }
+    note(lines.join("\n"), "Gateway");
+  }
+
   cfg = await maybeRepairAnthropicOAuthProfileId(cfg, prompter);
   await noteAuthProfileHealth({
     cfg,
@@ -95,10 +114,11 @@ export async function doctorCommand(
     note(gatewayDetails.remoteFallbackNote, "Gateway");
   }
   if (resolveMode(cfg) === "local") {
-    const authMode = cfg.gateway?.auth?.mode;
-    const token =
-      typeof cfg.gateway?.auth?.token === "string" ? cfg.gateway?.auth?.token.trim() : "";
-    const needsToken = authMode !== "password" && (authMode !== "token" || !token);
+    const auth = resolveGatewayAuth({
+      authConfig: cfg.gateway?.auth,
+      tailscaleMode: cfg.gateway?.tailscale?.mode ?? "off",
+    });
+    const needsToken = auth.mode !== "password" && (auth.mode !== "token" || !auth.token);
     if (needsToken) {
       note(
         "Gateway auth is off or missing a token. Token auth is now the recommended default (including loopback).",
@@ -247,12 +267,17 @@ export async function doctorCommand(
     healthOk,
   });
 
-  if (prompter.shouldRepair) {
+  const shouldWriteConfig = prompter.shouldRepair || configResult.shouldWriteConfig;
+  if (shouldWriteConfig) {
     cfg = applyWizardMetadata(cfg, { command: "doctor", mode: resolveMode(cfg) });
     await writeConfigFile(cfg);
-    runtime.log(`Updated ${CONFIG_PATH_CLAWDBOT}`);
+    logConfigUpdated(runtime);
+    const backupPath = `${CONFIG_PATH_CLAWDBOT}.bak`;
+    if (fs.existsSync(backupPath)) {
+      runtime.log(`Backup: ${shortenHomePath(backupPath)}`);
+    }
   } else {
-    runtime.log('Run "clawdbot doctor --fix" to apply changes.');
+    runtime.log(`Run "${formatCliCommand("clawdbot doctor --fix")}" to apply changes.`);
   }
 
   if (options.workspaceSuggestions !== false) {
@@ -260,6 +285,15 @@ export async function doctorCommand(
     noteWorkspaceBackupTip(workspaceDir);
     if (await shouldSuggestMemorySystem(workspaceDir)) {
       note(MEMORY_SYSTEM_PROMPT, "Workspace");
+    }
+  }
+
+  const finalSnapshot = await readConfigFileSnapshot();
+  if (finalSnapshot.exists && !finalSnapshot.valid) {
+    runtime.error("Invalid config:");
+    for (const issue of finalSnapshot.issues) {
+      const path = issue.path || "<root>";
+      runtime.error(`- ${path}: ${issue.message}`);
     }
   }
 

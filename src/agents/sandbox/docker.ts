@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 
 import { defaultRuntime } from "../../runtime.js";
+import { formatCliCommand } from "../../cli/command-format.js";
 import { DEFAULT_SANDBOX_IMAGE, SANDBOX_AGENT_WORKSPACE_MOUNT } from "./constants.js";
 import { readRegistry, updateRegistry } from "./registry.js";
 import { computeSandboxConfigHash } from "./config-hash.js";
@@ -49,7 +50,12 @@ async function dockerImageExists(image: string) {
   const result = await execDocker(["image", "inspect", image], {
     allowFailure: true,
   });
-  return result.code === 0;
+  if (result.code === 0) return true;
+  const stderr = result.stderr.trim();
+  if (stderr.includes("No such image")) {
+    return false;
+  }
+  throw new Error(`Failed to inspect sandbox image: ${stderr}`);
 }
 
 export async function ensureDockerImage(image: string) {
@@ -214,13 +220,13 @@ async function readContainerConfigHash(containerName: string): Promise<string | 
 
 function formatSandboxRecreateHint(params: { scope: SandboxConfig["scope"]; sessionKey: string }) {
   if (params.scope === "session") {
-    return `clawdbot sandbox recreate --session ${params.sessionKey}`;
+    return formatCliCommand(`clawdbot sandbox recreate --session ${params.sessionKey}`);
   }
   if (params.scope === "agent") {
     const agentId = resolveSandboxAgentId(params.sessionKey) ?? "main";
-    return `clawdbot sandbox recreate --agent ${agentId}`;
+    return formatCliCommand(`clawdbot sandbox recreate --agent ${agentId}`);
   }
-  return "clawdbot sandbox recreate --all";
+  return formatCliCommand("clawdbot sandbox recreate --all");
 }
 
 export async function ensureSandboxContainer(params: {

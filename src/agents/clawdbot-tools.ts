@@ -19,6 +19,7 @@ import { createSessionsListTool } from "./tools/sessions-list-tool.js";
 import { createSessionsSendTool } from "./tools/sessions-send-tool.js";
 import { createSessionsSpawnTool } from "./tools/sessions-spawn-tool.js";
 import { createWebFetchTool, createWebSearchTool } from "./tools/web-tools.js";
+import { createTtsTool } from "./tools/tts-tool.js";
 
 export function createClawdbotTools(options?: {
   browserControlUrl?: string;
@@ -29,6 +30,16 @@ export function createClawdbotTools(options?: {
   agentSessionKey?: string;
   agentChannel?: GatewayMessageChannel;
   agentAccountId?: string;
+  /** Delivery target (e.g. telegram:group:123:topic:456) for topic/thread routing. */
+  agentTo?: string;
+  /** Thread/topic identifier for routing replies to the originating thread. */
+  agentThreadId?: string | number;
+  /** Group id for channel-level tool policy inheritance. */
+  agentGroupId?: string | null;
+  /** Group channel label for channel-level tool policy inheritance. */
+  agentGroupChannel?: string | null;
+  /** Group space label for channel-level tool policy inheritance. */
+  agentGroupSpace?: string | null;
   agentDir?: string;
   sandboxRoot?: string;
   workspaceDir?: string;
@@ -45,6 +56,8 @@ export function createClawdbotTools(options?: {
   hasRepliedRef?: { value: boolean };
   /** If true, the model has native vision capability */
   modelHasVision?: boolean;
+  /** Explicit agent ID override for cron/hook sessions. */
+  requesterAgentIdOverride?: string;
 }): AnyAgentTool[] {
   const imageTool = options?.agentDir?.trim()
     ? createImageTool({
@@ -88,11 +101,18 @@ export function createClawdbotTools(options?: {
       replyToMode: options?.replyToMode,
       hasRepliedRef: options?.hasRepliedRef,
     }),
+    createTtsTool({
+      agentChannel: options?.agentChannel,
+      config: options?.config,
+    }),
     createGatewayTool({
       agentSessionKey: options?.agentSessionKey,
       config: options?.config,
     }),
-    createAgentsListTool({ agentSessionKey: options?.agentSessionKey }),
+    createAgentsListTool({
+      agentSessionKey: options?.agentSessionKey,
+      requesterAgentIdOverride: options?.requesterAgentIdOverride,
+    }),
     createSessionsListTool({
       agentSessionKey: options?.agentSessionKey,
       sandboxed: options?.sandboxed,
@@ -110,7 +130,13 @@ export function createClawdbotTools(options?: {
       agentSessionKey: options?.agentSessionKey,
       agentChannel: options?.agentChannel,
       agentAccountId: options?.agentAccountId,
+      agentTo: options?.agentTo,
+      agentThreadId: options?.agentThreadId,
+      agentGroupId: options?.agentGroupId,
+      agentGroupChannel: options?.agentGroupChannel,
+      agentGroupSpace: options?.agentGroupSpace,
       sandboxed: options?.sandboxed,
+      requesterAgentIdOverride: options?.requesterAgentIdOverride,
     }),
     createSessionStatusTool({
       agentSessionKey: options?.agentSessionKey,

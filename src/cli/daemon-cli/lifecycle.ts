@@ -33,11 +33,24 @@ export async function runDaemonUninstall(opts: DaemonLifecycleOptions = {}) {
   };
 
   if (resolveIsNixMode(process.env)) {
-    fail("Nix mode detected; daemon uninstall is disabled.");
+    fail("Nix mode detected; service uninstall is disabled.");
     return;
   }
 
   const service = resolveGatewayService();
+  let loaded = false;
+  try {
+    loaded = await service.isLoaded({ env: process.env });
+  } catch {
+    loaded = false;
+  }
+  if (loaded) {
+    try {
+      await service.stop({ env: process.env, stdout });
+    } catch {
+      // Best-effort stop; final loaded check gates success.
+    }
+  }
   try {
     await service.uninstall({ env: process.env, stdout });
   } catch (err) {
@@ -45,11 +58,15 @@ export async function runDaemonUninstall(opts: DaemonLifecycleOptions = {}) {
     return;
   }
 
-  let loaded = false;
+  loaded = false;
   try {
     loaded = await service.isLoaded({ env: process.env });
   } catch {
     loaded = false;
+  }
+  if (loaded) {
+    fail("Gateway service still loaded after uninstall.");
+    return;
   }
   emit({
     ok: true,
@@ -200,7 +217,7 @@ export async function runDaemonStop(opts: DaemonLifecycleOptions = {}) {
 }
 
 /**
- * Restart the gateway daemon service.
+ * Restart the gateway service service.
  * @returns `true` if restart succeeded, `false` if the service was not loaded.
  * Throws/exits on check or restart failures.
  */

@@ -1,6 +1,8 @@
 {
   "ensureLogins": [
+    "odrobnik",
     "alphonse-arianee",
+    "aaronn",
     "ronak-guliani",
     "cpojer",
     "carlulsoe",
@@ -9,7 +11,11 @@
     "longmaba",
     "manmal",
     "thesash",
-    "rhjoh"
+    "rhjoh",
+    "ysqander",
+    "atalovesyou",
+    "0xJonHoldsCrypto",
+    "hougangdev"
   ],
   "seedCommit": "d6863f87",
   "placeholderAvatar": "assets/avatar-placeholder.svg",

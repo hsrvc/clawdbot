@@ -109,34 +109,34 @@ export function handleMessageUpdate(
     .trim();
   if (next && next !== ctx.state.lastStreamedAssistant) {
     const previousText = ctx.state.lastStreamedAssistant ?? "";
-    ctx.state.lastStreamedAssistant = next;
     const { text: cleanedText, mediaUrls } = parseReplyDirectives(next);
     const { text: previousCleanedText } = parseReplyDirectives(previousText);
-    const deltaText = cleanedText.startsWith(previousCleanedText)
-      ? cleanedText.slice(previousCleanedText.length)
-      : cleanedText;
-    emitAgentEvent({
-      runId: ctx.params.runId,
-      stream: "assistant",
-      data: {
-        text: cleanedText,
-        delta: deltaText,
-        mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
-      },
-    });
-    void ctx.params.onAgentEvent?.({
-      stream: "assistant",
-      data: {
-        text: cleanedText,
-        delta: deltaText,
-        mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
-      },
-    });
-    if (ctx.params.onPartialReply && ctx.state.shouldEmitPartialReplies) {
-      void ctx.params.onPartialReply({
-        text: cleanedText,
-        mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
+    if (cleanedText.startsWith(previousCleanedText)) {
+      const deltaText = cleanedText.slice(previousCleanedText.length);
+      ctx.state.lastStreamedAssistant = next;
+      emitAgentEvent({
+        runId: ctx.params.runId,
+        stream: "assistant",
+        data: {
+          text: cleanedText,
+          delta: deltaText,
+          mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
+        },
       });
+      void ctx.params.onAgentEvent?.({
+        stream: "assistant",
+        data: {
+          text: cleanedText,
+          delta: deltaText,
+          mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
+        },
+      });
+      if (ctx.params.onPartialReply && ctx.state.shouldEmitPartialReplies) {
+        void ctx.params.onPartialReply({
+          text: cleanedText,
+          mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
+        });
+      }
     }
   }
 
@@ -226,14 +226,27 @@ export function handleMessageEnd(
         );
       } else {
         ctx.state.lastBlockReplyText = text;
-        const { text: cleanedText, mediaUrls, audioAsVoice } = parseReplyDirectives(text);
-        // Emit if there's content OR audioAsVoice flag (to propagate the flag).
-        if (cleanedText || (mediaUrls && mediaUrls.length > 0) || audioAsVoice) {
-          void onBlockReply({
+        const splitResult = ctx.consumeReplyDirectives(text, { final: true });
+        if (splitResult) {
+          const {
             text: cleanedText,
-            mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
+            mediaUrls,
             audioAsVoice,
-          });
+            replyToId,
+            replyToTag,
+            replyToCurrent,
+          } = splitResult;
+          // Emit if there's content OR audioAsVoice flag (to propagate the flag).
+          if (cleanedText || (mediaUrls && mediaUrls.length > 0) || audioAsVoice) {
+            void onBlockReply({
+              text: cleanedText,
+              mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
+              audioAsVoice,
+              replyToId,
+              replyToTag,
+              replyToCurrent,
+            });
+          }
         }
       }
     }
@@ -242,6 +255,30 @@ export function handleMessageEnd(
   if (!shouldEmitReasoningBeforeAnswer) maybeEmitReasoning();
   if (ctx.state.streamReasoning && rawThinking) {
     ctx.emitReasoningStream(rawThinking);
+  }
+
+  if (ctx.state.blockReplyBreak === "text_end" && onBlockReply) {
+    const tailResult = ctx.consumeReplyDirectives("", { final: true });
+    if (tailResult) {
+      const {
+        text: cleanedText,
+        mediaUrls,
+        audioAsVoice,
+        replyToId,
+        replyToTag,
+        replyToCurrent,
+      } = tailResult;
+      if (cleanedText || (mediaUrls && mediaUrls.length > 0) || audioAsVoice) {
+        void onBlockReply({
+          text: cleanedText,
+          mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
+          audioAsVoice,
+          replyToId,
+          replyToTag,
+          replyToCurrent,
+        });
+      }
+    }
   }
 
   ctx.state.deltaBuffer = "";

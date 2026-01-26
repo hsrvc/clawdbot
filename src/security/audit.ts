@@ -5,6 +5,7 @@ import type { ClawdbotConfig } from "../config/config.js";
 import { resolveBrowserConfig } from "../browser/config.js";
 import { resolveConfigPath, resolveStateDir } from "../config/paths.js";
 import { resolveGatewayAuth } from "../gateway/auth.js";
+import { formatCliCommand } from "../cli/command-format.js";
 import { buildGatewayConnectionDetails } from "../gateway/call.js";
 import { probeGateway } from "../gateway/probe.js";
 import {
@@ -13,6 +14,7 @@ import {
   collectHooksHardeningFindings,
   collectIncludeFilePermFindings,
   collectModelHygieneFindings,
+  collectSmallModelRiskFindings,
   collectPluginsTrustFindings,
   collectSecretsInConfigFindings,
   collectStateDeepFilesystemFindings,
@@ -205,14 +207,50 @@ function collectGatewayConfigFindings(cfg: ClawdbotConfig): SecurityAuditFinding
   const bind = typeof cfg.gateway?.bind === "string" ? cfg.gateway.bind : "loopback";
   const tailscaleMode = cfg.gateway?.tailscale?.mode ?? "off";
   const auth = resolveGatewayAuth({ authConfig: cfg.gateway?.auth, tailscaleMode });
+  const controlUiEnabled = cfg.gateway?.controlUi?.enabled !== false;
+  const trustedProxies = Array.isArray(cfg.gateway?.trustedProxies)
+    ? cfg.gateway.trustedProxies
+    : [];
+  const hasToken = typeof auth.token === "string" && auth.token.trim().length > 0;
+  const hasPassword = typeof auth.password === "string" && auth.password.trim().length > 0;
+  const hasSharedSecret =
+    (auth.mode === "token" && hasToken) || (auth.mode === "password" && hasPassword);
+  const hasTailscaleAuth = auth.allowTailscale === true && tailscaleMode === "serve";
+  const hasGatewayAuth = hasSharedSecret || hasTailscaleAuth;
 
-  if (bind !== "loopback" && auth.mode === "none") {
+  if (bind !== "loopback" && !hasSharedSecret) {
     findings.push({
       checkId: "gateway.bind_no_auth",
       severity: "critical",
       title: "Gateway binds beyond loopback without auth",
       detail: `gateway.bind="${bind}" but no gateway.auth token/password is configured.`,
       remediation: `Set gateway.auth (token recommended) or bind to loopback.`,
+    });
+  }
+
+  if (bind === "loopback" && controlUiEnabled && trustedProxies.length === 0) {
+    findings.push({
+      checkId: "gateway.trusted_proxies_missing",
+      severity: "warn",
+      title: "Reverse proxy headers are not trusted",
+      detail:
+        "gateway.bind is loopback and gateway.trustedProxies is empty. " +
+        "If you expose the Control UI through a reverse proxy, configure trusted proxies " +
+        "so local-client checks cannot be spoofed.",
+      remediation:
+        "Set gateway.trustedProxies to your proxy IPs or keep the Control UI local-only.",
+    });
+  }
+
+  if (bind === "loopback" && controlUiEnabled && !hasGatewayAuth) {
+    findings.push({
+      checkId: "gateway.loopback_no_auth",
+      severity: "critical",
+      title: "Gateway auth missing on loopback",
+      detail:
+        "gateway.bind is loopback but no gateway auth secret is configured. " +
+        "If the Control UI is exposed through a reverse proxy, unauthenticated access is possible.",
+      remediation: "Set gateway.auth (token recommended) or keep the Control UI local-only.",
     });
   }
 
@@ -230,6 +268,17 @@ function collectGatewayConfigFindings(cfg: ClawdbotConfig): SecurityAuditFinding
       severity: "info",
       title: "Tailscale Serve exposure enabled",
       detail: `gateway.tailscale.mode="serve" exposes the Gateway to your tailnet (loopback behind Tailscale).`,
+    });
+  }
+
+  if (cfg.gateway?.controlUi?.allowInsecureAuth === true) {
+    findings.push({
+      checkId: "gateway.control_ui.insecure_auth",
+      severity: "warn",
+      title: "Control UI allows insecure HTTP auth",
+      detail:
+        "gateway.controlUi.allowInsecureAuth=true allows token-only auth over HTTP and skips device identity.",
+      remediation: "Disable it or switch to HTTPS (Tailscale Serve) or localhost.",
     });
   }
 
@@ -264,7 +313,7 @@ function collectBrowserControlFindings(cfg: ClawdbotConfig): SecurityAuditFindin
       severity: "warn",
       title: "Browser control config looks invalid",
       detail: String(err),
-      remediation: `Fix browser.controlUrl/browser.cdpUrl in ${resolveConfigPath()} and re-run "clawdbot security audit --deep".`,
+      remediation: `Fix browser.controlUrl/browser.cdpUrl in ${resolveConfigPath()} and re-run "${formatCliCommand("clawdbot security audit --deep")}".`,
     });
     return findings;
   }
@@ -804,6 +853,7 @@ export async function runSecurityAudit(opts: SecurityAuditOptions): Promise<Secu
   findings.push(...collectHooksHardeningFindings(cfg));
   findings.push(...collectSecretsInConfigFindings(cfg));
   findings.push(...collectModelHygieneFindings(cfg));
+  findings.push(...collectSmallModelRiskFindings({ cfg, env }));
   findings.push(...collectExposureMatrixFindings(cfg));
 
   const configSnapshot =
@@ -840,7 +890,7 @@ export async function runSecurityAudit(opts: SecurityAuditOptions): Promise<Secu
       severity: "warn",
       title: "Gateway probe failed (deep)",
       detail: deep.gateway.error ?? "gateway unreachable",
-      remediation: `Run "clawdbot status --all" to debug connectivity/auth, then re-run "clawdbot security audit --deep".`,
+      remediation: `Run "${formatCliCommand("clawdbot status --all")}" to debug connectivity/auth, then re-run "${formatCliCommand("clawdbot security audit --deep")}".`,
     });
   }
 

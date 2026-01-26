@@ -1,20 +1,28 @@
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import fsPromises from "node:fs/promises";
 import path from "node:path";
 
 import {
   addAllowlistEntry,
-  matchAllowlist,
+  analyzeArgvCommand,
+  evaluateExecAllowlist,
+  evaluateShellAllowlist,
+  requiresExecApproval,
   normalizeExecApprovals,
   recordAllowlistUse,
-  resolveCommandResolution,
   resolveExecApprovals,
+  resolveSafeBins,
   ensureExecApprovals,
   readExecApprovalsSnapshot,
   resolveExecApprovalsSocketPath,
   saveExecApprovals,
+  type ExecAsk,
+  type ExecSecurity,
   type ExecApprovalsFile,
+  type ExecAllowlistEntry,
+  type ExecCommandSegment,
 } from "../infra/exec-approvals.js";
 import {
   requestExecHostViaSocket,
@@ -25,6 +33,10 @@ import {
 import { getMachineDisplayName } from "../infra/machine-name.js";
 import { loadOrCreateDeviceIdentity } from "../infra/device-identity.js";
 import { loadConfig } from "../config/config.js";
+import { resolveBrowserConfig, shouldStartLocalBrowserServer } from "../browser/config.js";
+import { detectMime } from "../media/mime.js";
+import { resolveAgentConfig } from "../agents/agent-scope.js";
+import { ensureClawdbotCliOnPath } from "../infra/path-env.js";
 import { VERSION } from "../version.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../utils/message-channel.js";
 
@@ -50,10 +62,32 @@ type SystemRunParams = {
   agentId?: string | null;
   sessionKey?: string | null;
   approved?: boolean | null;
+  approvalDecision?: string | null;
+  runId?: string | null;
 };
 
 type SystemWhichParams = {
   bins: string[];
+};
+
+type BrowserProxyParams = {
+  method?: string;
+  path?: string;
+  query?: Record<string, string | number | boolean | null | undefined>;
+  body?: unknown;
+  timeoutMs?: number;
+  profile?: string;
+};
+
+type BrowserProxyFile = {
+  path: string;
+  base64: string;
+  mimeType?: string;
+};
+
+type BrowserProxyResult = {
+  result: unknown;
+  files?: BrowserProxyFile[];
 };
 
 type SystemExecApprovalsSetParams = {
@@ -78,6 +112,14 @@ type RunResult = {
   truncated: boolean;
 };
 
+function resolveExecSecurity(value?: string): ExecSecurity {
+  return value === "deny" || value === "allowlist" || value === "full" ? value : "allowlist";
+}
+
+function resolveExecAsk(value?: string): ExecAsk {
+  return value === "off" || value === "on-miss" || value === "always" ? value : "on-miss";
+}
+
 type ExecEventPayload = {
   sessionKey: string;
   runId: string;
@@ -101,12 +143,14 @@ type NodeInvokeRequestPayload = {
 
 const OUTPUT_CAP = 200_000;
 const OUTPUT_EVENT_TAIL = 20_000;
+const DEFAULT_NODE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const BROWSER_PROXY_MAX_FILE_BYTES = 10 * 1024 * 1024;
 
 const execHostEnforced = process.env.CLAWDBOT_NODE_EXEC_HOST?.trim().toLowerCase() === "app";
-const execHostFallbackAllowed = process.env.CLAWDBOT_NODE_EXEC_FALLBACK?.trim() === "1";
+const execHostFallbackAllowed =
+  process.env.CLAWDBOT_NODE_EXEC_FALLBACK?.trim().toLowerCase() !== "0";
 
 const blockedEnvKeys = new Set([
-  "PATH",
   "NODE_OPTIONS",
   "PYTHONHOME",
   "PYTHONPATH",
@@ -152,15 +196,95 @@ function sanitizeEnv(
 ): Record<string, string> | undefined {
   if (!overrides) return undefined;
   const merged = { ...process.env } as Record<string, string>;
+  const basePath = process.env.PATH ?? DEFAULT_NODE_PATH;
   for (const [rawKey, value] of Object.entries(overrides)) {
     const key = rawKey.trim();
     if (!key) continue;
     const upper = key.toUpperCase();
+    if (upper === "PATH") {
+      const trimmed = value.trim();
+      if (!trimmed) continue;
+      if (!basePath || trimmed === basePath) {
+        merged[key] = trimmed;
+        continue;
+      }
+      const suffix = `${path.delimiter}${basePath}`;
+      if (trimmed.endsWith(suffix)) {
+        merged[key] = trimmed;
+      }
+      continue;
+    }
     if (blockedEnvKeys.has(upper)) continue;
     if (blockedEnvPrefixes.some((prefix) => upper.startsWith(prefix))) continue;
     merged[key] = value;
   }
   return merged;
+}
+
+function normalizeProfileAllowlist(raw?: string[]): string[] {
+  return Array.isArray(raw) ? raw.map((entry) => entry.trim()).filter(Boolean) : [];
+}
+
+function resolveBrowserProxyConfig() {
+  const cfg = loadConfig();
+  const proxy = cfg.nodeHost?.browserProxy;
+  const allowProfiles = normalizeProfileAllowlist(proxy?.allowProfiles);
+  const enabled = proxy?.enabled !== false;
+  return { enabled, allowProfiles };
+}
+
+let browserControlReady: Promise<void> | null = null;
+
+async function ensureBrowserControlServer(): Promise<void> {
+  if (browserControlReady) return browserControlReady;
+  browserControlReady = (async () => {
+    const cfg = loadConfig();
+    const resolved = resolveBrowserConfig(cfg.browser);
+    if (!resolved.enabled) {
+      throw new Error("browser control disabled");
+    }
+    if (!shouldStartLocalBrowserServer(resolved)) {
+      throw new Error("browser control URL is non-loopback");
+    }
+    const mod = await import("../browser/server.js");
+    await mod.startBrowserControlServerFromConfig();
+  })();
+  return browserControlReady;
+}
+
+function isProfileAllowed(params: { allowProfiles: string[]; profile?: string | null }) {
+  const { allowProfiles, profile } = params;
+  if (!allowProfiles.length) return true;
+  if (!profile) return false;
+  return allowProfiles.includes(profile.trim());
+}
+
+function collectBrowserProxyPaths(payload: unknown): string[] {
+  const paths = new Set<string>();
+  const obj =
+    typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>) : null;
+  if (!obj) return [];
+  if (typeof obj.path === "string" && obj.path.trim()) paths.add(obj.path.trim());
+  if (typeof obj.imagePath === "string" && obj.imagePath.trim()) paths.add(obj.imagePath.trim());
+  const download = obj.download;
+  if (download && typeof download === "object") {
+    const dlPath = (download as Record<string, unknown>).path;
+    if (typeof dlPath === "string" && dlPath.trim()) paths.add(dlPath.trim());
+  }
+  return [...paths];
+}
+
+async function readBrowserProxyFile(filePath: string): Promise<BrowserProxyFile | null> {
+  const stat = await fsPromises.stat(filePath).catch(() => null);
+  if (!stat || !stat.isFile()) return null;
+  if (stat.size > BROWSER_PROXY_MAX_FILE_BYTES) {
+    throw new Error(
+      `browser proxy file exceeds ${Math.round(BROWSER_PROXY_MAX_FILE_BYTES / (1024 * 1024))}MB`,
+    );
+  }
+  const buffer = await fsPromises.readFile(filePath);
+  const mimeType = await detectMime({ buffer, filePath });
+  return { path: filePath, base64: buffer.toString("base64"), mimeType };
 }
 
 function formatCommand(argv: string[]): string {
@@ -285,8 +409,16 @@ function resolveEnvPath(env?: Record<string, string>): string[] {
     (env as Record<string, string>)?.Path ??
     process.env.PATH ??
     process.env.Path ??
-    "";
+    DEFAULT_NODE_PATH;
   return raw.split(path.delimiter).filter(Boolean);
+}
+
+function ensureNodePathEnv(): string {
+  ensureClawdbotCliOnPath({ pathEnv: process.env.PATH ?? "" });
+  const current = process.env.PATH ?? "";
+  if (current.trim()) return current;
+  process.env.PATH = DEFAULT_NODE_PATH;
+  return DEFAULT_NODE_PATH;
 }
 
 function resolveExecutable(bin: string, env?: Record<string, string>) {
@@ -355,6 +487,12 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
   await saveNodeHostConfig(config);
 
   const cfg = loadConfig();
+  const browserProxy = resolveBrowserProxyConfig();
+  const resolvedBrowser = resolveBrowserConfig(cfg.browser);
+  const browserProxyEnabled =
+    browserProxy.enabled &&
+    resolvedBrowser.enabled &&
+    shouldStartLocalBrowserServer(resolvedBrowser);
   const isRemoteMode = cfg.gateway?.mode === "remote";
   const token =
     process.env.CLAWDBOT_GATEWAY_TOKEN?.trim() ||
@@ -367,6 +505,9 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
   const port = gateway.port ?? 18789;
   const scheme = gateway.tls ? "wss" : "ws";
   const url = `${scheme}://${host}:${port}`;
+  const pathEnv = ensureNodePathEnv();
+  // eslint-disable-next-line no-console
+  console.log(`node host PATH: ${pathEnv}`);
 
   const client = new GatewayClient({
     url,
@@ -380,13 +521,15 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
     mode: GATEWAY_CLIENT_MODES.NODE,
     role: "node",
     scopes: [],
-    caps: ["system"],
+    caps: ["system", ...(browserProxyEnabled ? ["browser"] : [])],
     commands: [
       "system.run",
       "system.which",
       "system.execApprovals.get",
       "system.execApprovals.set",
+      ...(browserProxyEnabled ? ["browser.proxy"] : []),
     ],
+    pathEnv,
     permissions: undefined,
     deviceIdentity: loadOrCreateDeviceIdentity(),
     tlsFingerprint: gateway.tlsFingerprint,
@@ -513,6 +656,123 @@ async function handleInvoke(
     return;
   }
 
+  if (command === "browser.proxy") {
+    try {
+      const params = decodeParams<BrowserProxyParams>(frame.paramsJSON);
+      const pathValue = typeof params.path === "string" ? params.path.trim() : "";
+      if (!pathValue) {
+        throw new Error("INVALID_REQUEST: path required");
+      }
+      const proxyConfig = resolveBrowserProxyConfig();
+      if (!proxyConfig.enabled) {
+        throw new Error("UNAVAILABLE: node browser proxy disabled");
+      }
+      await ensureBrowserControlServer();
+      const resolved = resolveBrowserConfig(loadConfig().browser);
+      const requestedProfile = typeof params.profile === "string" ? params.profile.trim() : "";
+      const allowedProfiles = proxyConfig.allowProfiles;
+      if (allowedProfiles.length > 0) {
+        if (pathValue !== "/profiles") {
+          const profileToCheck = requestedProfile || resolved.defaultProfile;
+          if (!isProfileAllowed({ allowProfiles: allowedProfiles, profile: profileToCheck })) {
+            throw new Error("INVALID_REQUEST: browser profile not allowed");
+          }
+        } else if (requestedProfile) {
+          if (!isProfileAllowed({ allowProfiles: allowedProfiles, profile: requestedProfile })) {
+            throw new Error("INVALID_REQUEST: browser profile not allowed");
+          }
+        }
+      }
+
+      const url = new URL(
+        pathValue.startsWith("/") ? pathValue : `/${pathValue}`,
+        resolved.controlUrl,
+      );
+      if (requestedProfile) {
+        url.searchParams.set("profile", requestedProfile);
+      }
+      const query = params.query ?? {};
+      for (const [key, value] of Object.entries(query)) {
+        if (value === undefined || value === null) continue;
+        url.searchParams.set(key, String(value));
+      }
+      const method = typeof params.method === "string" ? params.method.toUpperCase() : "GET";
+      const body = params.body;
+      const ctrl = new AbortController();
+      const timeoutMs =
+        typeof params.timeoutMs === "number" && Number.isFinite(params.timeoutMs)
+          ? Math.max(1, Math.floor(params.timeoutMs))
+          : 20_000;
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+      const headers = new Headers();
+      let bodyJson: string | undefined;
+      if (body !== undefined) {
+        headers.set("Content-Type", "application/json");
+        bodyJson = JSON.stringify(body);
+      }
+      const token =
+        process.env.CLAWDBOT_BROWSER_CONTROL_TOKEN?.trim() || resolved.controlToken?.trim();
+      if (token) {
+        headers.set("Authorization", `Bearer ${token}`);
+      }
+      let res: Response;
+      try {
+        res = await fetch(url.toString(), {
+          method,
+          headers,
+          body: bodyJson,
+          signal: ctrl.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(text ? `${res.status}: ${text}` : `HTTP ${res.status}`);
+      }
+      const result = (await res.json()) as unknown;
+      if (allowedProfiles.length > 0 && url.pathname === "/profiles") {
+        const obj =
+          typeof result === "object" && result !== null ? (result as Record<string, unknown>) : {};
+        const profiles = Array.isArray(obj.profiles) ? obj.profiles : [];
+        obj.profiles = profiles.filter((entry) => {
+          if (!entry || typeof entry !== "object") return false;
+          const name = (entry as Record<string, unknown>).name;
+          return typeof name === "string" && allowedProfiles.includes(name);
+        });
+      }
+      let files: BrowserProxyFile[] | undefined;
+      const paths = collectBrowserProxyPaths(result);
+      if (paths.length > 0) {
+        const loaded = await Promise.all(
+          paths.map(async (p) => {
+            try {
+              const file = await readBrowserProxyFile(p);
+              if (!file) {
+                throw new Error("file not found");
+              }
+              return file;
+            } catch (err) {
+              throw new Error(`browser proxy file read failed for ${p}: ${String(err)}`);
+            }
+          }),
+        );
+        if (loaded.length > 0) files = loaded;
+      }
+      const payload: BrowserProxyResult = files ? { result, files } : { result };
+      await sendInvokeResult(client, frame, {
+        ok: true,
+        payloadJSON: JSON.stringify(payload),
+      });
+    } catch (err) {
+      await sendInvokeResult(client, frame, {
+        ok: false,
+        error: { code: "INVALID_REQUEST", message: String(err) },
+      });
+    }
+    return;
+  }
+
   if (command !== "system.run") {
     await sendInvokeResult(client, frame, {
       ok: false,
@@ -544,23 +804,64 @@ async function handleInvoke(
   const rawCommand = typeof params.rawCommand === "string" ? params.rawCommand.trim() : "";
   const cmdText = rawCommand || formatCommand(argv);
   const agentId = params.agentId?.trim() || undefined;
-  const approvals = resolveExecApprovals(agentId);
+  const cfg = loadConfig();
+  const agentExec = agentId ? resolveAgentConfig(cfg, agentId)?.tools?.exec : undefined;
+  const configuredSecurity = resolveExecSecurity(agentExec?.security ?? cfg.tools?.exec?.security);
+  const configuredAsk = resolveExecAsk(agentExec?.ask ?? cfg.tools?.exec?.ask);
+  const approvals = resolveExecApprovals(agentId, {
+    security: configuredSecurity,
+    ask: configuredAsk,
+  });
   const security = approvals.agent.security;
   const ask = approvals.agent.ask;
   const autoAllowSkills = approvals.agent.autoAllowSkills;
   const sessionKey = params.sessionKey?.trim() || "node";
-  const runId = crypto.randomUUID();
+  const runId = params.runId?.trim() || crypto.randomUUID();
   const env = sanitizeEnv(params.env ?? undefined);
-  const resolution = resolveCommandResolution(cmdText, params.cwd ?? undefined, env);
-  const allowlistMatch =
-    security === "allowlist" ? matchAllowlist(approvals.allowlist, resolution) : null;
+  const safeBins = resolveSafeBins(agentExec?.safeBins ?? cfg.tools?.exec?.safeBins);
   const bins = autoAllowSkills ? await skillBins.current() : new Set<string>();
-  const skillAllow =
-    autoAllowSkills && resolution?.executableName ? bins.has(resolution.executableName) : false;
+  let analysisOk = false;
+  let allowlistMatches: ExecAllowlistEntry[] = [];
+  let allowlistSatisfied = false;
+  let segments: ExecCommandSegment[] = [];
+  if (rawCommand) {
+    const allowlistEval = evaluateShellAllowlist({
+      command: rawCommand,
+      allowlist: approvals.allowlist,
+      safeBins,
+      cwd: params.cwd ?? undefined,
+      env,
+      skillBins: bins,
+      autoAllowSkills,
+    });
+    analysisOk = allowlistEval.analysisOk;
+    allowlistMatches = allowlistEval.allowlistMatches;
+    allowlistSatisfied =
+      security === "allowlist" && analysisOk ? allowlistEval.allowlistSatisfied : false;
+    segments = allowlistEval.segments;
+  } else {
+    const analysis = analyzeArgvCommand({ argv, cwd: params.cwd ?? undefined, env });
+    const allowlistEval = evaluateExecAllowlist({
+      analysis,
+      allowlist: approvals.allowlist,
+      safeBins,
+      cwd: params.cwd ?? undefined,
+      skillBins: bins,
+      autoAllowSkills,
+    });
+    analysisOk = analysis.ok;
+    allowlistMatches = allowlistEval.allowlistMatches;
+    allowlistSatisfied =
+      security === "allowlist" && analysisOk ? allowlistEval.allowlistSatisfied : false;
+    segments = analysis.segments;
+  }
 
-  const useMacAppExec =
-    process.platform === "darwin" && (execHostEnforced || !execHostFallbackAllowed);
+  const useMacAppExec = process.platform === "darwin";
   if (useMacAppExec) {
+    const approvalDecision =
+      params.approvalDecision === "allow-once" || params.approvalDecision === "allow-always"
+        ? params.approvalDecision
+        : null;
     const execRequest: ExecHostRequest = {
       command: argv,
       rawCommand: rawCommand || null,
@@ -570,31 +871,32 @@ async function handleInvoke(
       needsScreenRecording: params.needsScreenRecording ?? null,
       agentId: agentId ?? null,
       sessionKey: sessionKey ?? null,
+      approvalDecision,
     };
     const response = await runViaMacAppExecHost({ approvals, request: execRequest });
     if (!response) {
-      await sendNodeEvent(
-        client,
-        "exec.denied",
-        buildExecEventPayload({
-          sessionKey,
-          runId,
-          host: "node",
-          command: cmdText,
-          reason: "companion-unavailable",
-        }),
-      );
-      await sendInvokeResult(client, frame, {
-        ok: false,
-        error: {
-          code: "UNAVAILABLE",
-          message: "COMPANION_APP_UNAVAILABLE: macOS app exec host unreachable",
-        },
-      });
-      return;
-    }
-
-    if (!response.ok) {
+      if (execHostEnforced || !execHostFallbackAllowed) {
+        await sendNodeEvent(
+          client,
+          "exec.denied",
+          buildExecEventPayload({
+            sessionKey,
+            runId,
+            host: "node",
+            command: cmdText,
+            reason: "companion-unavailable",
+          }),
+        );
+        await sendInvokeResult(client, frame, {
+          ok: false,
+          error: {
+            code: "UNAVAILABLE",
+            message: "COMPANION_APP_UNAVAILABLE: macOS app exec host unreachable",
+          },
+        });
+        return;
+      }
+    } else if (!response.ok) {
       const reason = response.error.reason ?? "approval-required";
       await sendNodeEvent(
         client,
@@ -612,29 +914,29 @@ async function handleInvoke(
         error: { code: "UNAVAILABLE", message: response.error.message },
       });
       return;
+    } else {
+      const result: ExecHostRunResult = response.payload;
+      const combined = [result.stdout, result.stderr, result.error].filter(Boolean).join("\n");
+      await sendNodeEvent(
+        client,
+        "exec.finished",
+        buildExecEventPayload({
+          sessionKey,
+          runId,
+          host: "node",
+          command: cmdText,
+          exitCode: result.exitCode,
+          timedOut: result.timedOut,
+          success: result.success,
+          output: combined,
+        }),
+      );
+      await sendInvokeResult(client, frame, {
+        ok: true,
+        payloadJSON: JSON.stringify(result),
+      });
+      return;
     }
-
-    const result: ExecHostRunResult = response.payload;
-    const combined = [result.stdout, result.stderr, result.error].filter(Boolean).join("\n");
-    await sendNodeEvent(
-      client,
-      "exec.finished",
-      buildExecEventPayload({
-        sessionKey,
-        runId,
-        host: "node",
-        command: cmdText,
-        exitCode: result.exitCode,
-        timedOut: result.timedOut,
-        success: result.success,
-        output: combined,
-      }),
-    );
-    await sendInvokeResult(client, frame, {
-      ok: true,
-      payloadJSON: JSON.stringify(result),
-    });
-    return;
   }
 
   if (security === "deny") {
@@ -656,11 +958,18 @@ async function handleInvoke(
     return;
   }
 
-  const requiresAsk =
-    ask === "always" ||
-    (ask === "on-miss" && security === "allowlist" && !allowlistMatch && !skillAllow);
+  const requiresAsk = requiresExecApproval({
+    ask,
+    security,
+    analysisOk,
+    allowlistSatisfied,
+  });
 
-  const approvedByAsk = params.approved === true;
+  const approvalDecision =
+    params.approvalDecision === "allow-once" || params.approvalDecision === "allow-always"
+      ? params.approvalDecision
+      : null;
+  const approvedByAsk = approvalDecision !== null || params.approved === true;
   if (requiresAsk && !approvedByAsk) {
     await sendNodeEvent(
       client,
@@ -679,12 +988,16 @@ async function handleInvoke(
     });
     return;
   }
-  if (approvedByAsk && security === "allowlist") {
-    const pattern = resolution?.resolvedPath ?? resolution?.rawExecutable ?? argv[0] ?? "";
-    if (pattern) addAllowlistEntry(approvals.file, agentId, pattern);
+  if (approvalDecision === "allow-always" && security === "allowlist") {
+    if (analysisOk) {
+      for (const segment of segments) {
+        const pattern = segment.resolution?.resolvedPath ?? "";
+        if (pattern) addAllowlistEntry(approvals.file, agentId, pattern);
+      }
+    }
   }
 
-  if (security === "allowlist" && !allowlistMatch && !skillAllow && !approvedByAsk) {
+  if (security === "allowlist" && (!analysisOk || !allowlistSatisfied) && !approvedByAsk) {
     await sendNodeEvent(
       client,
       "exec.denied",
@@ -703,8 +1016,19 @@ async function handleInvoke(
     return;
   }
 
-  if (allowlistMatch) {
-    recordAllowlistUse(approvals.file, agentId, allowlistMatch, cmdText, resolution?.resolvedPath);
+  if (allowlistMatches.length > 0) {
+    const seen = new Set<string>();
+    for (const match of allowlistMatches) {
+      if (!match?.pattern || seen.has(match.pattern)) continue;
+      seen.add(match.pattern);
+      recordAllowlistUse(
+        approvals.file,
+        agentId,
+        match,
+        cmdText,
+        segments[0]?.resolution?.resolvedPath,
+      );
+    }
   }
 
   if (params.needsScreenRecording === true) {
@@ -725,17 +1049,6 @@ async function handleInvoke(
     });
     return;
   }
-
-  await sendNodeEvent(
-    client,
-    "exec.started",
-    buildExecEventPayload({
-      sessionKey,
-      runId,
-      host: "node",
-      command: cmdText,
-    }),
-  );
 
   const result = await runCommand(
     argv,
@@ -823,17 +1136,50 @@ async function sendInvokeResult(
   },
 ) {
   try {
-    await client.request("node.invoke.result", {
-      id: frame.id,
-      nodeId: frame.nodeId,
-      ok: result.ok,
-      payload: result.payload,
-      payloadJSON: result.payloadJSON ?? null,
-      error: result.error ?? null,
-    });
+    await client.request("node.invoke.result", buildNodeInvokeResultParams(frame, result));
   } catch {
     // ignore: node invoke responses are best-effort
   }
+}
+
+export function buildNodeInvokeResultParams(
+  frame: NodeInvokeRequestPayload,
+  result: {
+    ok: boolean;
+    payload?: unknown;
+    payloadJSON?: string | null;
+    error?: { code?: string; message?: string } | null;
+  },
+): {
+  id: string;
+  nodeId: string;
+  ok: boolean;
+  payload?: unknown;
+  payloadJSON?: string;
+  error?: { code?: string; message?: string };
+} {
+  const params: {
+    id: string;
+    nodeId: string;
+    ok: boolean;
+    payload?: unknown;
+    payloadJSON?: string;
+    error?: { code?: string; message?: string };
+  } = {
+    id: frame.id,
+    nodeId: frame.nodeId,
+    ok: result.ok,
+  };
+  if (result.payload !== undefined) {
+    params.payload = result.payload;
+  }
+  if (typeof result.payloadJSON === "string") {
+    params.payloadJSON = result.payloadJSON;
+  }
+  if (result.error) {
+    params.error = result.error;
+  }
+  return params;
 }
 
 async function sendNodeEvent(client: GatewayClient, event: string, payload: unknown) {

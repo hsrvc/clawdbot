@@ -8,7 +8,7 @@ read_when:
 This repo supports “remote over SSH” by keeping a single Gateway (the master) running on a dedicated host (desktop/server) and connecting clients to it.
 
 - For **operators (you / the macOS app)**: SSH tunneling is the universal fallback.
-- For **nodes (iOS/Android and future devices)**: prefer the Gateway **Bridge** when on the same LAN/tailnet (see [Discovery](/gateway/discovery)).
+- For **nodes (iOS/Android and future devices)**: connect to the Gateway **WebSocket** (LAN/tailnet or SSH tunnel as needed).
 
 ## The core idea
 
@@ -50,17 +50,17 @@ Guide: [Tailscale](/gateway/tailscale) and [Web overview](/web).
 
 ## Command flow (what runs where)
 
-One gateway daemon owns state + channels. Nodes are peripherals.
+One gateway service owns state + channels. Nodes are peripherals.
 
 Flow example (Telegram → node):
 - Telegram message arrives at the **Gateway**.
 - Gateway runs the **agent** and decides whether to call a node tool.
-- Gateway calls the **node** over the Bridge (`node.*` RPC).
+- Gateway calls the **node** over the Gateway WebSocket (`node.*` RPC).
 - Node returns the result; Gateway replies back out to Telegram.
 
 Notes:
-- **Nodes do not run the gateway daemon.** Only one gateway should run per host unless you intentionally run isolated profiles (see [Multiple gateways](/gateway/multiple-gateways)).
-- macOS app “node mode” is just a node client over the Bridge.
+- **Nodes do not run the gateway service.** Only one gateway should run per host unless you intentionally run isolated profiles (see [Multiple gateways](/gateway/multiple-gateways)).
+- macOS app “node mode” is just a node client over the Gateway WebSocket.
 
 ## SSH tunnel (CLI + tools)
 
@@ -112,8 +112,9 @@ Runbook: [macOS remote access](/platforms/mac/remote).
 Short version: **keep the Gateway loopback-only** unless you’re sure you need a bind.
 
 - **Loopback + SSH/Tailscale Serve** is the safest default (no public exposure).
-- **Non-loopback binds** (`lan`/`tailnet`/`auto`) must use auth tokens/passwords.
+- **Non-loopback binds** (`lan`/`tailnet`/`custom`, or `auto` when loopback is unavailable) must use auth tokens/passwords.
 - `gateway.remote.token` is **only** for remote CLI calls — it does **not** enable local auth.
+- `gateway.remote.tlsFingerprint` pins the remote TLS cert when using `wss://`.
 - **Tailscale Serve** can authenticate via identity headers when `gateway.auth.allowTailscale: true`.
   Set it to `false` if you want tokens/passwords instead.
 - Treat `browser.controlUrl` like an admin API: tailnet-only + token auth.

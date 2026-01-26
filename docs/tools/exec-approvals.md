@@ -11,7 +11,8 @@ read_when:
 Exec approvals are the **companion app / node host guardrail** for letting a sandboxed agent run
 commands on a real host (`gateway` or `node`). Think of it like a safety interlock:
 commands are allowed only when policy + allowlist + (optional) user approval all agree.
-Exec approvals are **in addition** to tool policy and elevated gating.
+Exec approvals are **in addition** to tool policy and elevated gating (unless elevated is set to `full`, which skips approvals).
+Effective policy is the **stricter** of `tools.exec.*` and approvals defaults; if an approvals field is omitted, the `tools.exec` value is used.
 
 If the companion app UI is **not available**, any request that requires a prompt is
 resolved by the **ask fallback** (default: deny).
@@ -22,8 +23,8 @@ Exec approvals are enforced locally on the execution host:
 - **gateway host** → `clawdbot` process on the gateway machine
 - **node host** → node runner (macOS companion app or headless node host)
 
-Planned macOS split:
-- **node service** forwards `system.run` to the **macOS app** over local IPC.
+macOS split:
+- **node host service** forwards `system.run` to the **macOS app** over local IPC.
 - **macOS app** enforces approvals + executes the command in UI context.
 
 ## Settings and storage
@@ -54,6 +55,7 @@ Example schema:
       "autoAllowSkills": true,
       "allowlist": [
         {
+          "id": "B0C8C0B3-2C2D-4F8A-9A3C-5A4B3C2D1E0F",
           "pattern": "~/Projects/**/bin/rg",
           "lastUsedAt": 1737150000000,
           "lastUsedCommand": "rg -n TODO",
@@ -87,6 +89,8 @@ If a prompt is required but no UI is reachable, fallback decides:
 
 Allowlists are **per agent**. If multiple agents exist, switch which agent you’re
 editing in the macOS app. Patterns are **case-insensitive glob matches**.
+Patterns should resolve to **binary paths** (basename-only entries are ignored).
+Legacy `agents.default` entries are migrated to `agents.main` on load.
 
 Examples:
 - `~/Projects/**/bin/bird`
@@ -94,6 +98,7 @@ Examples:
 - `/opt/homebrew/bin/rg`
 
 Each allowlist entry tracks:
+- **id** stable UUID used for UI identity (optional)
 - **last used** timestamp
 - **last used command**
 - **last resolved path**
@@ -101,8 +106,20 @@ Each allowlist entry tracks:
 ## Auto-allow skill CLIs
 
 When **Auto-allow skill CLIs** is enabled, executables referenced by known skills
-are treated as allowlisted on nodes (macOS node or headless node host). This uses the Bridge RPC to ask the
-gateway for the skill bin list. Disable this if you want strict manual allowlists.
+are treated as allowlisted on nodes (macOS node or headless node host). This uses
+`skills.bins` over the Gateway RPC to fetch the skill bin list. Disable this if you want strict manual allowlists.
+
+## Safe bins (stdin-only)
+
+`tools.exec.safeBins` defines a small list of **stdin-only** binaries (for example `jq`)
+that can run in allowlist mode **without** explicit allowlist entries. Safe bins reject
+positional file args and path-like tokens, so they can only operate on the incoming stream.
+Shell chaining and redirections are not auto-allowed in allowlist mode.
+
+Shell chaining (`&&`, `||`, `;`) is allowed when every top-level segment satisfies the allowlist
+(including safe bins or skill auto-allow). Redirections remain unsupported in allowlist mode.
+
+Default safe bins: `jq`, `grep`, `cut`, `sort`, `uniq`, `head`, `tail`, `tr`, `wc`.
 
 ## Control UI editing
 
@@ -120,7 +137,15 @@ CLI: `clawdbot approvals` supports gateway or node editing (see [Approvals CLI](
 
 ## Approval flow
 
-When a prompt is required, the companion app displays a confirmation dialog with:
+When a prompt is required, the gateway broadcasts `exec.approval.requested` to operator clients.
+The Control UI and macOS app resolve it via `exec.approval.resolve`, then the gateway forwards the
+approved request to the node host.
+
+When approvals are required, the exec tool returns immediately with an approval id. Use that id to
+correlate later system events (`Exec finished` / `Exec denied`). If no decision arrives before the
+timeout, the request is treated as an approval timeout and surfaced as a denial reason.
+
+The confirmation dialog includes:
 - command + args
 - cwd
 - agent id
@@ -132,12 +157,42 @@ Actions:
 - **Always allow** → add to allowlist + run
 - **Deny** → block
 
-### macOS IPC flow (planned)
+## Approval forwarding to chat channels
+
+You can forward exec approval prompts to any chat channel (including plugin channels) and approve
+them with `/approve`. This uses the normal outbound delivery pipeline.
+
+Config:
+```json5
+{
+  approvals: {
+    exec: {
+      enabled: true,
+      mode: "session", // "session" | "targets" | "both"
+      agentFilter: ["main"],
+      sessionFilter: ["discord"], // substring or regex
+      targets: [
+        { channel: "slack", to: "U12345678" },
+        { channel: "telegram", to: "123456789" }
+      ]
+    }
+  }
+}
 ```
-Gateway -> Bridge -> Node Service (TS)
-                    |  IPC (UDS + token + HMAC + TTL)
-                    v
-                Mac App (UI + approvals + system.run)
+
+Reply in chat:
+```
+/approve <id> allow-once
+/approve <id> allow-always
+/approve <id> deny
+```
+
+### macOS IPC flow
+```
+Gateway -> Node Service (WS)
+                 |  IPC (UDS + token + HMAC + TTL)
+                 v
+             Mac App (UI + approvals + system.run)
 ```
 
 Security notes:
@@ -148,11 +203,13 @@ Security notes:
 ## System events
 
 Exec lifecycle is surfaced as system messages:
-- `exec.started`
-- `exec.finished`
-- `exec.denied`
+- `Exec running` (only if the command exceeds the running notice threshold)
+- `Exec finished`
+- `Exec denied`
 
 These are posted to the agent’s session after the node reports the event.
+Gateway-host exec approvals emit the same lifecycle events when the command finishes (and optionally when running longer than the threshold).
+Approval-gated execs reuse the approval id as the `runId` in these messages for easy correlation.
 
 ## Implications
 

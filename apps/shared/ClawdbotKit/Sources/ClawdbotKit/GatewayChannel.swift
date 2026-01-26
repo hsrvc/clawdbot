@@ -15,6 +15,9 @@ extension URLSessionWebSocketTask: WebSocketTasking {}
 
 public struct WebSocketTaskBox: @unchecked Sendable {
     public let task: any WebSocketTasking
+    public init(task: any WebSocketTasking) {
+        self.task = task
+    }
 
     public var state: URLSessionTask.State { self.task.state }
 
@@ -91,8 +94,19 @@ public struct GatewayConnectOptions: Sendable {
     }
 }
 
+public enum GatewayAuthSource: String, Sendable {
+    case deviceToken = "device-token"
+    case sharedToken = "shared-token"
+    case password = "password"
+    case none = "none"
+}
+
 // Avoid ambiguity with the app's own AnyCodable type.
 private typealias ProtoAnyCodable = ClawdbotProtocol.AnyCodable
+
+private enum ConnectChallengeError: Error {
+    case timeout
+}
 
 public actor GatewayChannelActor {
     private let logger = Logger(subsystem: "com.clawdbot", category: "gateway")
@@ -110,9 +124,11 @@ public actor GatewayChannelActor {
     private var lastSeq: Int?
     private var lastTick: Date?
     private var tickIntervalMs: Double = 30000
+    private var lastAuthSource: GatewayAuthSource = .none
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
     private let connectTimeoutSeconds: Double = 6
+    private let connectChallengeTimeoutSeconds: Double = 0.75
     private var watchdogTask: Task<Void, Never>?
     private var tickTask: Task<Void, Never>?
     private let defaultRequestTimeoutMs: Double = 15000
@@ -140,6 +156,8 @@ public actor GatewayChannelActor {
             await self?.startWatchdog()
         }
     }
+
+    public func authSource() -> GatewayAuthSource { self.lastAuthSource }
 
     public func shutdown() async {
         self.shouldReconnect = false
@@ -256,6 +274,8 @@ public actor GatewayChannelActor {
         let clientDisplayName = options.clientDisplayName ?? InstanceIdentity.displayName
         let clientId = options.clientId
         let clientMode = options.clientMode
+        let role = options.role
+        let scopes = options.scopes
 
         let reqId = UUID().uuidString
         var client: [String: ProtoAnyCodable] = [
@@ -278,8 +298,8 @@ public actor GatewayChannelActor {
             "caps": ProtoAnyCodable(options.caps),
             "locale": ProtoAnyCodable(primaryLocale),
             "userAgent": ProtoAnyCodable(ProcessInfo.processInfo.operatingSystemVersionString),
-            "role": ProtoAnyCodable(options.role),
-            "scopes": ProtoAnyCodable(options.scopes),
+            "role": ProtoAnyCodable(role),
+            "scopes": ProtoAnyCodable(scopes),
         ]
         if !options.commands.isEmpty {
             params["commands"] = ProtoAnyCodable(options.commands)
@@ -287,32 +307,56 @@ public actor GatewayChannelActor {
         if !options.permissions.isEmpty {
             params["permissions"] = ProtoAnyCodable(options.permissions)
         }
-        if let token = self.token {
-            params["auth"] = ProtoAnyCodable(["token": ProtoAnyCodable(token)])
+        let identity = DeviceIdentityStore.loadOrCreate()
+        let storedToken = DeviceAuthStore.loadToken(deviceId: identity.deviceId, role: role)?.token
+        let authToken = storedToken ?? self.token
+        let authSource: GatewayAuthSource
+        if storedToken != nil {
+            authSource = .deviceToken
+        } else if authToken != nil {
+            authSource = .sharedToken
+        } else if self.password != nil {
+            authSource = .password
+        } else {
+            authSource = .none
+        }
+        self.lastAuthSource = authSource
+        self.logger.info("gateway connect auth=\(authSource.rawValue, privacy: .public)")
+        let canFallbackToShared = storedToken != nil && self.token != nil
+        if let authToken {
+            params["auth"] = ProtoAnyCodable(["token": ProtoAnyCodable(authToken)])
         } else if let password = self.password {
             params["auth"] = ProtoAnyCodable(["password": ProtoAnyCodable(password)])
         }
-        let identity = DeviceIdentityStore.loadOrCreate()
         let signedAtMs = Int(Date().timeIntervalSince1970 * 1000)
-        let scopes = options.scopes.joined(separator: ",")
-        let payload = [
-            "v1",
+        let connectNonce = try await self.waitForConnectChallenge()
+        let scopesValue = scopes.joined(separator: ",")
+        var payloadParts = [
+            connectNonce == nil ? "v1" : "v2",
             identity.deviceId,
             clientId,
             clientMode,
-            options.role,
-            scopes,
+            role,
+            scopesValue,
             String(signedAtMs),
-            self.token ?? "",
-        ].joined(separator: "|")
+            authToken ?? "",
+        ]
+        if let connectNonce {
+            payloadParts.append(connectNonce)
+        }
+        let payload = payloadParts.joined(separator: "|")
         if let signature = DeviceIdentityStore.signPayload(payload, identity: identity),
            let publicKey = DeviceIdentityStore.publicKeyBase64Url(identity) {
-            params["device"] = ProtoAnyCodable([
+            var device: [String: ProtoAnyCodable] = [
                 "id": ProtoAnyCodable(identity.deviceId),
                 "publicKey": ProtoAnyCodable(publicKey),
                 "signature": ProtoAnyCodable(signature),
                 "signedAt": ProtoAnyCodable(signedAtMs),
-            ])
+            ]
+            if let connectNonce {
+                device["nonce"] = ProtoAnyCodable(connectNonce)
+            }
+            params["device"] = ProtoAnyCodable(device)
         }
 
         let frame = RequestFrame(
@@ -322,40 +366,22 @@ public actor GatewayChannelActor {
             params: ProtoAnyCodable(params))
         let data = try self.encoder.encode(frame)
         try await self.task?.send(.data(data))
-        guard let msg = try await task?.receive() else {
-            throw NSError(
-                domain: "Gateway",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "connect failed (no response)"])
+        do {
+            let response = try await self.waitForConnectResponse(reqId: reqId)
+            try await self.handleConnectResponse(response, identity: identity, role: role)
+        } catch {
+            if canFallbackToShared {
+                DeviceAuthStore.clearToken(deviceId: identity.deviceId, role: role)
+            }
+            throw error
         }
-        try await self.handleConnectResponse(msg, reqId: reqId)
     }
 
-    private func handleConnectResponse(_ msg: URLSessionWebSocketTask.Message, reqId: String) async throws {
-        let data: Data? = switch msg {
-        case let .data(d): d
-        case let .string(s): s.data(using: .utf8)
-        @unknown default: nil
-        }
-        guard let data else {
-            throw NSError(
-                domain: "Gateway",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "connect failed (empty response)"])
-        }
-        let decoder = JSONDecoder()
-        guard let frame = try? decoder.decode(GatewayFrame.self, from: data) else {
-            throw NSError(
-                domain: "Gateway",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "connect failed (invalid response)"])
-        }
-        guard case let .res(res) = frame, res.id == reqId else {
-            throw NSError(
-                domain: "Gateway",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "connect failed (unexpected response)"])
-        }
+    private func handleConnectResponse(
+        _ res: ResponseFrame,
+        identity: DeviceIdentity,
+        role: String
+    ) async throws {
         if res.ok == false {
             let msg = (res.error?["message"]?.value as? String) ?? "gateway connect failed"
             throw NSError(domain: "Gateway", code: 1008, userInfo: [NSLocalizedDescriptionKey: msg])
@@ -372,6 +398,17 @@ public actor GatewayChannelActor {
             self.tickIntervalMs = tick
         } else if let tick = ok.policy["tickIntervalMs"]?.value as? Int {
             self.tickIntervalMs = Double(tick)
+        }
+        if let auth = ok.auth,
+           let deviceToken = auth["deviceToken"]?.value as? String {
+            let authRole = auth["role"]?.value as? String ?? role
+            let scopes = (auth["scopes"]?.value as? [ProtoAnyCodable])?
+                .compactMap { $0.value as? String } ?? []
+            _ = DeviceAuthStore.storeToken(
+                deviceId: identity.deviceId,
+                role: authRole,
+                token: deviceToken,
+                scopes: scopes)
         }
         self.lastTick = Date()
         self.tickTask?.cancel()
@@ -424,6 +461,7 @@ public actor GatewayChannelActor {
                 waiter.resume(returning: .res(res))
             }
         case let .event(evt):
+            if evt.event == "connect.challenge" { return }
             if let seq = evt.seq {
                 if let last = lastSeq, seq > last + 1 {
                     await self.pushHandler?(.seqGap(expected: last + 1, received: seq))
@@ -435,6 +473,63 @@ public actor GatewayChannelActor {
         default:
             break
         }
+    }
+
+    private func waitForConnectChallenge() async throws -> String? {
+        guard let task = self.task else { return nil }
+        do {
+            return try await AsyncTimeout.withTimeout(
+                seconds: self.connectChallengeTimeoutSeconds,
+                onTimeout: { ConnectChallengeError.timeout },
+                operation: { [weak self] in
+                    guard let self else { return nil }
+                    while true {
+                        let msg = try await task.receive()
+                        guard let data = self.decodeMessageData(msg) else { continue }
+                        guard let frame = try? self.decoder.decode(GatewayFrame.self, from: data) else { continue }
+                        if case let .event(evt) = frame, evt.event == "connect.challenge" {
+                            if let payload = evt.payload?.value as? [String: ProtoAnyCodable],
+                               let nonce = payload["nonce"]?.value as? String {
+                                return nonce
+                            }
+                        }
+                    }
+                })
+        } catch {
+            if error is ConnectChallengeError { return nil }
+            throw error
+        }
+    }
+
+    private func waitForConnectResponse(reqId: String) async throws -> ResponseFrame {
+        guard let task = self.task else {
+            throw NSError(
+                domain: "Gateway",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "connect failed (no response)"])
+        }
+        while true {
+            let msg = try await task.receive()
+            guard let data = self.decodeMessageData(msg) else { continue }
+            guard let frame = try? self.decoder.decode(GatewayFrame.self, from: data) else {
+                throw NSError(
+                    domain: "Gateway",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "connect failed (invalid response)"])
+            }
+            if case let .res(res) = frame, res.id == reqId {
+                return res
+            }
+        }
+    }
+
+    private nonisolated func decodeMessageData(_ msg: URLSessionWebSocketTask.Message) -> Data? {
+        let data: Data? = switch msg {
+        case let .data(data): data
+        case let .string(text): text.data(using: .utf8)
+        @unknown default: nil
+        }
+        return data
     }
 
     private func watchTicks() async {
@@ -479,39 +574,22 @@ public actor GatewayChannelActor {
         params: [String: AnyCodable]?,
         timeoutMs: Double? = nil) async throws -> Data
     {
-        do {
-            try await self.connect()
-        } catch {
-            throw self.wrap(error, context: "gateway connect")
-        }
-        let id = UUID().uuidString
+        try await self.connectOrThrow(context: "gateway connect")
         let effectiveTimeout = timeoutMs ?? self.defaultRequestTimeoutMs
-        // Encode request using the generated models to avoid JSONSerialization/ObjC bridging pitfalls.
-        let paramsObject: ProtoAnyCodable? = params.map { entries in
-            let dict = entries.reduce(into: [String: ProtoAnyCodable]()) { dict, entry in
-                dict[entry.key] = ProtoAnyCodable(entry.value.value)
-            }
-            return ProtoAnyCodable(dict)
-        }
-        let frame = RequestFrame(
-            type: "req",
-            id: id,
-            method: method,
-            params: paramsObject)
-        let data = try self.encoder.encode(frame)
+        let payload = try self.encodeRequest(method: method, params: params, kind: "request")
         let response = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<GatewayFrame, Error>) in
-            self.pending[id] = cont
+            self.pending[payload.id] = cont
             Task { [weak self] in
                 guard let self else { return }
                 try? await Task.sleep(nanoseconds: UInt64(effectiveTimeout * 1_000_000))
-                await self.timeoutRequest(id: id, timeoutMs: effectiveTimeout)
+                await self.timeoutRequest(id: payload.id, timeoutMs: effectiveTimeout)
             }
             Task {
                 do {
-                    try await self.task?.send(.data(data))
+                    try await self.task?.send(.data(payload.data))
                 } catch {
                     let wrapped = self.wrap(error, context: "gateway send \(method)")
-                    let waiter = self.pending.removeValue(forKey: id)
+                    let waiter = self.pending.removeValue(forKey: payload.id)
                     // Treat send failures as a broken socket: mark disconnected and trigger reconnect.
                     self.connected = false
                     self.task?.cancel(with: .goingAway, reason: nil)
@@ -541,6 +619,29 @@ public actor GatewayChannelActor {
         return Data() // Should not happen, but tolerate empty payloads.
     }
 
+    public func send(method: String, params: [String: AnyCodable]?) async throws {
+        try await self.connectOrThrow(context: "gateway connect")
+        let payload = try self.encodeRequest(method: method, params: params, kind: "send")
+        guard let task = self.task else {
+            throw NSError(
+                domain: "Gateway",
+                code: 5,
+                userInfo: [NSLocalizedDescriptionKey: "gateway socket unavailable"])
+        }
+        do {
+            try await task.send(.data(payload.data))
+        } catch {
+            let wrapped = self.wrap(error, context: "gateway send \(method)")
+            self.connected = false
+            self.task?.cancel(with: .goingAway, reason: nil)
+            Task { [weak self] in
+                guard let self else { return }
+                await self.scheduleReconnect()
+            }
+            throw wrapped
+        }
+    }
+
     // Wrap low-level URLSession/WebSocket errors with context so UI can surface them.
     private func wrap(_ error: Error, context: String) -> Error {
         if let urlError = error as? URLError {
@@ -553,6 +654,42 @@ public actor GatewayChannelActor {
         let ns = error as NSError
         let desc = ns.localizedDescription.isEmpty ? "unknown" : ns.localizedDescription
         return NSError(domain: ns.domain, code: ns.code, userInfo: [NSLocalizedDescriptionKey: "\(context): \(desc)"])
+    }
+
+    private func connectOrThrow(context: String) async throws {
+        do {
+            try await self.connect()
+        } catch {
+            throw self.wrap(error, context: context)
+        }
+    }
+
+    private func encodeRequest(
+        method: String,
+        params: [String: AnyCodable]?,
+        kind: String) throws -> (id: String, data: Data)
+    {
+        let id = UUID().uuidString
+        // Encode request using the generated models to avoid JSONSerialization/ObjC bridging pitfalls.
+        let paramsObject: ProtoAnyCodable? = params.map { entries in
+            let dict = entries.reduce(into: [String: ProtoAnyCodable]()) { dict, entry in
+                dict[entry.key] = ProtoAnyCodable(entry.value.value)
+            }
+            return ProtoAnyCodable(dict)
+        }
+        let frame = RequestFrame(
+            type: "req",
+            id: id,
+            method: method,
+            params: paramsObject)
+        do {
+            let data = try self.encoder.encode(frame)
+            return (id: id, data: data)
+        } catch {
+            self.logger.error(
+                "gateway \(kind) encode failed \(method, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            throw error
+        }
     }
 
     private func failPending(_ error: Error) async {

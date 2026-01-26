@@ -2,14 +2,20 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   buildCommandText,
+  buildCommandTextFromArgs,
+  findCommandByNativeName,
   getCommandDetection,
   listChatCommands,
   listChatCommandsForConfig,
   listNativeCommandSpecs,
   listNativeCommandSpecsForConfig,
   normalizeCommandBody,
+  parseCommandArgs,
+  resolveCommandArgMenu,
+  serializeCommandArgs,
   shouldHandleTextCommands,
 } from "./commands-registry.js";
+import type { ChatCommandDefinition } from "./commands-registry.types.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
 import { createTestRegistry } from "../test-utils/channel-plugins.js";
 
@@ -25,12 +31,14 @@ describe("commands registry", () => {
   it("builds command text with args", () => {
     expect(buildCommandText("status")).toBe("/status");
     expect(buildCommandText("model", "gpt-5")).toBe("/model gpt-5");
+    expect(buildCommandText("models")).toBe("/models");
   });
 
   it("exposes native specs", () => {
     const specs = listNativeCommandSpecs();
     expect(specs.find((spec) => spec.name === "help")).toBeTruthy();
     expect(specs.find((spec) => spec.name === "stop")).toBeTruthy();
+    expect(specs.find((spec) => spec.name === "skill")).toBeTruthy();
     expect(specs.find((spec) => spec.name === "whoami")).toBeTruthy();
     expect(specs.find((spec) => spec.name === "compact")).toBeFalsy();
   });
@@ -78,9 +86,20 @@ describe("commands registry", () => {
     expect(native.find((spec) => spec.name === "demo_skill")).toBeTruthy();
   });
 
+  it("applies provider-specific native names", () => {
+    const native = listNativeCommandSpecsForConfig(
+      { commands: { native: true } },
+      { provider: "discord" },
+    );
+    expect(native.find((spec) => spec.name === "voice")).toBeTruthy();
+    expect(findCommandByNativeName("voice", "discord")?.key).toBe("tts");
+    expect(findCommandByNativeName("tts", "discord")).toBeUndefined();
+  });
+
   it("detects known text commands", () => {
     const detection = getCommandDetection();
     expect(detection.exact.has("/commands")).toBe(true);
+    expect(detection.exact.has("/skill")).toBe(true);
     expect(detection.exact.has("/compact")).toBe(true);
     expect(detection.exact.has("/whoami")).toBe(true);
     expect(detection.exact.has("/id")).toBe(true);
@@ -149,5 +168,152 @@ describe("commands registry", () => {
 
   it("normalizes dock command aliases", () => {
     expect(normalizeCommandBody("/dock_telegram")).toBe("/dock-telegram");
+  });
+});
+
+describe("commands registry args", () => {
+  it("parses positional args and captureRemaining", () => {
+    const command: ChatCommandDefinition = {
+      key: "debug",
+      description: "debug",
+      textAliases: [],
+      scope: "both",
+      argsParsing: "positional",
+      args: [
+        { name: "action", description: "action", type: "string" },
+        { name: "path", description: "path", type: "string" },
+        { name: "value", description: "value", type: "string", captureRemaining: true },
+      ],
+    };
+
+    const args = parseCommandArgs(command, "set foo bar baz");
+    expect(args?.values).toEqual({ action: "set", path: "foo", value: "bar baz" });
+  });
+
+  it("serializes args via raw first, then values", () => {
+    const command: ChatCommandDefinition = {
+      key: "model",
+      description: "model",
+      textAliases: [],
+      scope: "both",
+      argsParsing: "positional",
+      args: [{ name: "model", description: "model", type: "string", captureRemaining: true }],
+    };
+
+    expect(serializeCommandArgs(command, { raw: "gpt-5.2-codex" })).toBe("gpt-5.2-codex");
+    expect(serializeCommandArgs(command, { values: { model: "gpt-5.2-codex" } })).toBe(
+      "gpt-5.2-codex",
+    );
+    expect(buildCommandTextFromArgs(command, { values: { model: "gpt-5.2-codex" } })).toBe(
+      "/model gpt-5.2-codex",
+    );
+  });
+
+  it("resolves auto arg menus when missing a choice arg", () => {
+    const command: ChatCommandDefinition = {
+      key: "usage",
+      description: "usage",
+      textAliases: [],
+      scope: "both",
+      argsMenu: "auto",
+      argsParsing: "positional",
+      args: [
+        {
+          name: "mode",
+          description: "mode",
+          type: "string",
+          choices: ["off", "tokens", "full", "cost"],
+        },
+      ],
+    };
+
+    const menu = resolveCommandArgMenu({ command, args: undefined, cfg: {} as never });
+    expect(menu?.arg.name).toBe("mode");
+    expect(menu?.choices).toEqual(["off", "tokens", "full", "cost"]);
+  });
+
+  it("does not show menus when arg already provided", () => {
+    const command: ChatCommandDefinition = {
+      key: "usage",
+      description: "usage",
+      textAliases: [],
+      scope: "both",
+      argsMenu: "auto",
+      argsParsing: "positional",
+      args: [
+        {
+          name: "mode",
+          description: "mode",
+          type: "string",
+          choices: ["off", "tokens", "full", "cost"],
+        },
+      ],
+    };
+
+    const menu = resolveCommandArgMenu({
+      command,
+      args: { values: { mode: "tokens" } },
+      cfg: {} as never,
+    });
+    expect(menu).toBeNull();
+  });
+
+  it("resolves function-based choices with a default provider/model context", () => {
+    let seen: { provider: string; model: string; commandKey: string; argName: string } | null =
+      null;
+
+    const command: ChatCommandDefinition = {
+      key: "think",
+      description: "think",
+      textAliases: [],
+      scope: "both",
+      argsMenu: "auto",
+      argsParsing: "positional",
+      args: [
+        {
+          name: "level",
+          description: "level",
+          type: "string",
+          choices: ({ provider, model, command, arg }) => {
+            seen = { provider, model, commandKey: command.key, argName: arg.name };
+            return ["low", "high"];
+          },
+        },
+      ],
+    };
+
+    const menu = resolveCommandArgMenu({ command, args: undefined, cfg: {} as never });
+    expect(menu?.arg.name).toBe("level");
+    expect(menu?.choices).toEqual(["low", "high"]);
+    expect(seen?.commandKey).toBe("think");
+    expect(seen?.argName).toBe("level");
+    expect(seen?.provider).toBeTruthy();
+    expect(seen?.model).toBeTruthy();
+  });
+
+  it("does not show menus when args were provided as raw text only", () => {
+    const command: ChatCommandDefinition = {
+      key: "usage",
+      description: "usage",
+      textAliases: [],
+      scope: "both",
+      argsMenu: "auto",
+      argsParsing: "none",
+      args: [
+        {
+          name: "mode",
+          description: "on or off",
+          type: "string",
+          choices: ["off", "tokens", "full", "cost"],
+        },
+      ],
+    };
+
+    const menu = resolveCommandArgMenu({
+      command,
+      args: { raw: "on" },
+      cfg: {} as never,
+    });
+    expect(menu).toBeNull();
   });
 });

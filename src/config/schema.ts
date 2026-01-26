@@ -1,3 +1,4 @@
+import { CHANNEL_IDS } from "../channels/registry.js";
 import { VERSION } from "../version.js";
 import { ClawdbotSchema } from "./zod-schema.js";
 
@@ -47,8 +48,10 @@ export type ChannelUiMetadata = {
 const GROUP_LABELS: Record<string, string> = {
   wizard: "Wizard",
   update: "Update",
+  diagnostics: "Diagnostics",
   logging: "Logging",
   gateway: "Gateway",
+  nodeHost: "Node Host",
   agents: "Agents",
   tools: "Tools",
   bindings: "Bindings",
@@ -73,7 +76,9 @@ const GROUP_LABELS: Record<string, string> = {
 const GROUP_ORDER: Record<string, number> = {
   wizard: 20,
   update: 25,
+  diagnostics: 27,
   gateway: 30,
+  nodeHost: 35,
   agents: 40,
   tools: 50,
   bindings: 55,
@@ -101,11 +106,30 @@ const FIELD_LABELS: Record<string, string> = {
   "meta.lastTouchedAt": "Config Last Touched At",
   "update.channel": "Update Channel",
   "update.checkOnStart": "Update Check on Start",
+  "diagnostics.enabled": "Diagnostics Enabled",
+  "diagnostics.flags": "Diagnostics Flags",
+  "diagnostics.otel.enabled": "OpenTelemetry Enabled",
+  "diagnostics.otel.endpoint": "OpenTelemetry Endpoint",
+  "diagnostics.otel.protocol": "OpenTelemetry Protocol",
+  "diagnostics.otel.headers": "OpenTelemetry Headers",
+  "diagnostics.otel.serviceName": "OpenTelemetry Service Name",
+  "diagnostics.otel.traces": "OpenTelemetry Traces Enabled",
+  "diagnostics.otel.metrics": "OpenTelemetry Metrics Enabled",
+  "diagnostics.otel.logs": "OpenTelemetry Logs Enabled",
+  "diagnostics.otel.sampleRate": "OpenTelemetry Trace Sample Rate",
+  "diagnostics.otel.flushIntervalMs": "OpenTelemetry Flush Interval (ms)",
+  "diagnostics.cacheTrace.enabled": "Cache Trace Enabled",
+  "diagnostics.cacheTrace.filePath": "Cache Trace File Path",
+  "diagnostics.cacheTrace.includeMessages": "Cache Trace Include Messages",
+  "diagnostics.cacheTrace.includePrompt": "Cache Trace Include Prompt",
+  "diagnostics.cacheTrace.includeSystem": "Cache Trace Include System",
+  "agents.list.*.identity.avatar": "Identity Avatar",
   "gateway.remote.url": "Remote Gateway URL",
   "gateway.remote.sshTarget": "Remote Gateway SSH Target",
   "gateway.remote.sshIdentity": "Remote Gateway SSH Identity",
   "gateway.remote.token": "Remote Gateway Token",
   "gateway.remote.password": "Remote Gateway Password",
+  "gateway.remote.tlsFingerprint": "Remote Gateway TLS Fingerprint",
   "gateway.auth.token": "Gateway Token",
   "gateway.auth.password": "Gateway Password",
   "tools.media.image.enabled": "Enable Image Understanding",
@@ -135,6 +159,11 @@ const FIELD_LABELS: Record<string, string> = {
   "tools.media.video.attachments": "Video Understanding Attachment Policy",
   "tools.media.video.models": "Video Understanding Models",
   "tools.media.video.scope": "Video Understanding Scope",
+  "tools.links.enabled": "Enable Link Understanding",
+  "tools.links.maxLinks": "Link Understanding Max Links",
+  "tools.links.timeoutSeconds": "Link Understanding Timeout (sec)",
+  "tools.links.models": "Link Understanding Models",
+  "tools.links.scope": "Link Understanding Scope",
   "tools.profile": "Tool Profile",
   "agents.list[].tools.profile": "Agent Tool Profile",
   "tools.byProvider": "Tool Policy by Provider",
@@ -142,11 +171,13 @@ const FIELD_LABELS: Record<string, string> = {
   "tools.exec.applyPatch.enabled": "Enable apply_patch",
   "tools.exec.applyPatch.allowModels": "apply_patch Model Allowlist",
   "tools.exec.notifyOnExit": "Exec Notify On Exit",
+  "tools.exec.approvalRunningNoticeMs": "Exec Approval Running Notice (ms)",
   "tools.exec.host": "Exec Host",
   "tools.exec.security": "Exec Security",
   "tools.exec.ask": "Exec Ask",
   "tools.exec.node": "Exec Node Binding",
   "tools.exec.pathPrepend": "Exec PATH Prepend",
+  "tools.exec.safeBins": "Exec Safe Bins",
   "tools.message.allowCrossContextSend": "Allow Cross-Context Messaging",
   "tools.message.crossContext.allowWithinProvider": "Allow Cross-Context (Same Provider)",
   "tools.message.crossContext.allowAcrossProviders": "Allow Cross-Context (Across Providers)",
@@ -164,14 +195,23 @@ const FIELD_LABELS: Record<string, string> = {
   "tools.web.fetch.maxChars": "Web Fetch Max Chars",
   "tools.web.fetch.timeoutSeconds": "Web Fetch Timeout (sec)",
   "tools.web.fetch.cacheTtlMinutes": "Web Fetch Cache TTL (min)",
+  "tools.web.fetch.maxRedirects": "Web Fetch Max Redirects",
   "tools.web.fetch.userAgent": "Web Fetch User-Agent",
   "gateway.controlUi.basePath": "Control UI Base Path",
+  "gateway.controlUi.allowInsecureAuth": "Allow Insecure Control UI Auth",
   "gateway.http.endpoints.chatCompletions.enabled": "OpenAI Chat Completions Endpoint",
   "gateway.reload.mode": "Config Reload Mode",
   "gateway.reload.debounceMs": "Config Reload Debounce (ms)",
+  "gateway.nodes.browser.mode": "Gateway Node Browser Mode",
+  "gateway.nodes.browser.node": "Gateway Node Browser Pin",
+  "gateway.nodes.allowCommands": "Gateway Node Allowlist (Extra Commands)",
+  "gateway.nodes.denyCommands": "Gateway Node Denylist",
+  "nodeHost.browserProxy.enabled": "Node Browser Proxy Enabled",
+  "nodeHost.browserProxy.allowProfiles": "Node Browser Proxy Allowed Profiles",
   "skills.load.watch": "Watch Skills",
   "skills.load.watchDebounceMs": "Skills Watch Debounce (ms)",
   "agents.defaults.workspace": "Workspace",
+  "agents.defaults.repoRoot": "Repo Root",
   "agents.defaults.bootstrapMaxChars": "Bootstrap Max Chars",
   "agents.defaults.envelopeTimezone": "Envelope Timezone",
   "agents.defaults.envelopeTimestamp": "Envelope Timestamp",
@@ -198,6 +238,8 @@ const FIELD_LABELS: Record<string, string> = {
   "agents.defaults.memorySearch.sync.onSearch": "Index on Search (Lazy)",
   "agents.defaults.memorySearch.sync.watch": "Watch Memory Files",
   "agents.defaults.memorySearch.sync.watchDebounceMs": "Memory Watch Debounce (ms)",
+  "agents.defaults.memorySearch.sync.sessions.deltaBytes": "Session Delta Bytes",
+  "agents.defaults.memorySearch.sync.sessions.deltaMessages": "Session Delta Messages",
   "agents.defaults.memorySearch.query.maxResults": "Memory Search Max Results",
   "agents.defaults.memorySearch.query.minScore": "Memory Search Min Score",
   "agents.defaults.memorySearch.query.hybrid.enabled": "Memory Search Hybrid",
@@ -232,7 +274,11 @@ const FIELD_LABELS: Record<string, string> = {
   "commands.restart": "Allow Restart",
   "commands.useAccessGroups": "Use Access Groups",
   "ui.seamColor": "Accent Color",
+  "ui.assistant.name": "Assistant Name",
+  "ui.assistant.avatar": "Assistant Avatar",
   "browser.controlUrl": "Browser Control URL",
+  "browser.snapshotDefaults": "Browser Snapshot Defaults",
+  "browser.snapshotDefaults.mode": "Browser Snapshot Mode",
   "browser.remoteCdpTimeoutMs": "Remote CDP Timeout (ms)",
   "browser.remoteCdpHandshakeTimeoutMs": "Remote CDP Handshake Timeout (ms)",
   "session.dmScope": "DM Session Scope",
@@ -246,8 +292,10 @@ const FIELD_LABELS: Record<string, string> = {
   "channels.telegram.customCommands": "Telegram Custom Commands",
   "channels.discord": "Discord",
   "channels.slack": "Slack",
+  "channels.mattermost": "Mattermost",
   "channels.signal": "Signal",
   "channels.imessage": "iMessage",
+  "channels.bluebubbles": "BlueBubbles",
   "channels.msteams": "MS Teams",
   "channels.telegram.botToken": "Telegram Bot Token",
   "channels.telegram.dmPolicy": "Telegram DM Policy",
@@ -266,12 +314,15 @@ const FIELD_LABELS: Record<string, string> = {
   "channels.whatsapp.debounceMs": "WhatsApp Message Debounce (ms)",
   "channels.signal.dmPolicy": "Signal DM Policy",
   "channels.imessage.dmPolicy": "iMessage DM Policy",
+  "channels.bluebubbles.dmPolicy": "BlueBubbles DM Policy",
   "channels.discord.dm.policy": "Discord DM Policy",
   "channels.discord.retry.attempts": "Discord Retry Attempts",
   "channels.discord.retry.minDelayMs": "Discord Retry Min Delay (ms)",
   "channels.discord.retry.maxDelayMs": "Discord Retry Max Delay (ms)",
   "channels.discord.retry.jitter": "Discord Retry Jitter",
   "channels.discord.maxLinesPerMessage": "Discord Max Lines Per Message",
+  "channels.discord.intents.presence": "Discord Presence Intent",
+  "channels.discord.intents.guildMembers": "Discord Guild Members Intent",
   "channels.slack.dm.policy": "Slack DM Policy",
   "channels.slack.allowBots": "Slack Allow Bot Messages",
   "channels.discord.token": "Discord Bot Token",
@@ -281,8 +332,15 @@ const FIELD_LABELS: Record<string, string> = {
   "channels.slack.userTokenReadOnly": "Slack User Token Read Only",
   "channels.slack.thread.historyScope": "Slack Thread History Scope",
   "channels.slack.thread.inheritParent": "Slack Thread Parent Inheritance",
+  "channels.mattermost.botToken": "Mattermost Bot Token",
+  "channels.mattermost.baseUrl": "Mattermost Base URL",
+  "channels.mattermost.chatmode": "Mattermost Chat Mode",
+  "channels.mattermost.oncharPrefixes": "Mattermost Onchar Prefixes",
+  "channels.mattermost.requireMention": "Mattermost Require Mention",
   "channels.signal.account": "Signal Account",
   "channels.imessage.cliPath": "iMessage CLI Path",
+  "agents.list[].identity.avatar": "Agent Avatar",
+  "discovery.mdns.mode": "mDNS Discovery Mode",
   "plugins.enabled": "Enable Plugins",
   "plugins.allow": "Plugin Allowlist",
   "plugins.deny": "Plugin Denylist",
@@ -304,20 +362,49 @@ const FIELD_LABELS: Record<string, string> = {
 const FIELD_HELP: Record<string, string> = {
   "meta.lastTouchedVersion": "Auto-set when Clawdbot writes the config.",
   "meta.lastTouchedAt": "ISO timestamp of the last config write (auto-set).",
-  "update.channel": 'Update channel for npm installs ("stable" or "beta").',
+  "update.channel": 'Update channel for git + npm installs ("stable", "beta", or "dev").',
   "update.checkOnStart": "Check for npm updates when the gateway starts (default: true).",
   "gateway.remote.url": "Remote Gateway WebSocket URL (ws:// or wss://).",
+  "gateway.remote.tlsFingerprint":
+    "Expected sha256 TLS fingerprint for the remote gateway (pin to avoid MITM).",
   "gateway.remote.sshTarget":
     "Remote gateway over SSH (tunnels the gateway port to localhost). Format: user@host or user@host:port.",
   "gateway.remote.sshIdentity": "Optional SSH identity file path (passed to ssh -i).",
-  "gateway.auth.token": "Recommended for all gateways; required for non-loopback binds.",
+  "agents.list[].identity.avatar":
+    "Avatar image path (relative to the agent workspace only) or a remote URL/data URL.",
+  "discovery.mdns.mode":
+    'mDNS broadcast mode ("minimal" default, "full" includes cliPath/sshPort, "off" disables mDNS).',
+  "gateway.auth.token":
+    "Required by default for gateway access (unless using Tailscale Serve identity); required for non-loopback binds.",
   "gateway.auth.password": "Required for Tailscale funnel.",
   "gateway.controlUi.basePath":
     "Optional URL prefix where the Control UI is served (e.g. /clawdbot).",
+  "gateway.controlUi.allowInsecureAuth":
+    "Allow Control UI auth over insecure HTTP (token-only; not recommended).",
   "gateway.http.endpoints.chatCompletions.enabled":
     "Enable the OpenAI-compatible `POST /v1/chat/completions` endpoint (default: false).",
   "gateway.reload.mode": 'Hot reload strategy for config changes ("hybrid" recommended).',
   "gateway.reload.debounceMs": "Debounce window (ms) before applying config changes.",
+  "gateway.nodes.browser.mode":
+    'Node browser routing ("auto" = pick single connected browser node, "manual" = require node param, "off" = disable).',
+  "gateway.nodes.browser.node": "Pin browser routing to a specific node id or name (optional).",
+  "gateway.nodes.allowCommands":
+    "Extra node.invoke commands to allow beyond the gateway defaults (array of command strings).",
+  "gateway.nodes.denyCommands":
+    "Commands to block even if present in node claims or default allowlist.",
+  "nodeHost.browserProxy.enabled": "Expose the local browser control server via node proxy.",
+  "nodeHost.browserProxy.allowProfiles":
+    "Optional allowlist of browser profile names exposed via the node proxy.",
+  "diagnostics.flags":
+    'Enable targeted diagnostics logs by flag (e.g. ["telegram.http"]). Supports wildcards like "telegram.*" or "*".',
+  "diagnostics.cacheTrace.enabled":
+    "Log cache trace snapshots for embedded agent runs (default: false).",
+  "diagnostics.cacheTrace.filePath":
+    "JSONL output path for cache trace logs (default: $CLAWDBOT_STATE_DIR/logs/cache-trace.jsonl).",
+  "diagnostics.cacheTrace.includeMessages":
+    "Include full message payloads in trace output (default: true).",
+  "diagnostics.cacheTrace.includePrompt": "Include prompt text in trace output (default: true).",
+  "diagnostics.cacheTrace.includeSystem": "Include system prompt in trace output (default: true).",
   "tools.exec.applyPatch.enabled":
     "Experimental. Enables apply_patch for OpenAI models when allowed by tool policy.",
   "tools.exec.applyPatch.allowModels":
@@ -325,6 +412,8 @@ const FIELD_HELP: Record<string, string> = {
   "tools.exec.notifyOnExit":
     "When true (default), backgrounded exec sessions enqueue a system event and request a heartbeat on exit.",
   "tools.exec.pathPrepend": "Directories to prepend to PATH for exec runs (gateway/sandbox).",
+  "tools.exec.safeBins":
+    "Allow stdin-only safe binaries to run without explicit allowlist entries.",
   "tools.message.allowCrossContextSend":
     "Legacy override: allow cross-context sends across all providers.",
   "tools.message.crossContext.allowWithinProvider":
@@ -338,16 +427,23 @@ const FIELD_HELP: Record<string, string> = {
   "tools.message.crossContext.marker.suffix":
     'Text suffix for cross-context markers (supports "{channel}").',
   "tools.message.broadcast.enabled": "Enable broadcast action (default: true).",
-  "tools.web.search.enabled": "Enable the web_search tool (requires Brave API key).",
-  "tools.web.search.provider": 'Search provider (only "brave" supported today).',
+  "tools.web.search.enabled": "Enable the web_search tool (requires a provider API key).",
+  "tools.web.search.provider": 'Search provider ("brave" or "perplexity").',
   "tools.web.search.apiKey": "Brave Search API key (fallback: BRAVE_API_KEY env var).",
   "tools.web.search.maxResults": "Default number of results to return (1-10).",
   "tools.web.search.timeoutSeconds": "Timeout in seconds for web_search requests.",
   "tools.web.search.cacheTtlMinutes": "Cache TTL in minutes for web_search results.",
+  "tools.web.search.perplexity.apiKey":
+    "Perplexity or OpenRouter API key (fallback: PERPLEXITY_API_KEY or OPENROUTER_API_KEY env var).",
+  "tools.web.search.perplexity.baseUrl":
+    "Perplexity base URL override (default: https://openrouter.ai/api/v1 or https://api.perplexity.ai).",
+  "tools.web.search.perplexity.model":
+    'Perplexity model override (default: "perplexity/sonar-pro").',
   "tools.web.fetch.enabled": "Enable the web_fetch tool (lightweight HTTP fetch).",
   "tools.web.fetch.maxChars": "Max characters returned by web_fetch (truncated).",
   "tools.web.fetch.timeoutSeconds": "Timeout in seconds for web_fetch requests.",
   "tools.web.fetch.cacheTtlMinutes": "Cache TTL in minutes for web_fetch results.",
+  "tools.web.fetch.maxRedirects": "Maximum redirects allowed for web_fetch (default: 3).",
   "tools.web.fetch.userAgent": "Override User-Agent header for web_fetch requests.",
   "tools.web.fetch.readability":
     "Use Readability to extract main content from HTML (fallbacks to basic HTML cleanup).",
@@ -366,6 +462,15 @@ const FIELD_HELP: Record<string, string> = {
     'Scope for Slack thread history context ("thread" isolates per thread; "channel" reuses channel history).',
   "channels.slack.thread.inheritParent":
     "If true, Slack thread sessions inherit the parent channel transcript (default: false).",
+  "channels.mattermost.botToken":
+    "Bot token from Mattermost System Console -> Integrations -> Bot Accounts.",
+  "channels.mattermost.baseUrl":
+    "Base URL for your Mattermost server (e.g., https://chat.example.com).",
+  "channels.mattermost.chatmode":
+    'Reply to channel messages on mention ("oncall"), on trigger chars (">" or "!") ("onchar"), or on every message ("onmessage").',
+  "channels.mattermost.oncharPrefixes": 'Trigger prefixes for onchar mode (default: [">", "!"]).',
+  "channels.mattermost.requireMention":
+    "Require @mention in channels before responding (default: true).",
   "auth.profiles": "Named auth profiles (provider + mode + optional email).",
   "auth.order": "Ordered auth profile IDs per provider (used for automatic failover).",
   "auth.cooldowns.billingBackoffHours":
@@ -376,6 +481,8 @@ const FIELD_HELP: Record<string, string> = {
   "auth.cooldowns.failureWindowHours": "Failure window (hours) for backoff counters (default: 24).",
   "agents.defaults.bootstrapMaxChars":
     "Max characters of each workspace bootstrap file injected into the system prompt before truncation (default: 20000).",
+  "agents.defaults.repoRoot":
+    "Optional repository root shown in the system prompt runtime line (overrides auto-detect).",
   "agents.defaults.envelopeTimezone":
     'Timezone for message envelopes ("utc", "local", "user", or an IANA timezone string).',
   "agents.defaults.envelopeTimestamp":
@@ -427,8 +534,12 @@ const FIELD_HELP: Record<string, string> = {
   "agents.defaults.memorySearch.cache.maxEntries":
     "Optional cap on cached embeddings (best-effort).",
   "agents.defaults.memorySearch.sync.onSearch":
-    "Lazy sync: reindex on first search after a change.",
+    "Lazy sync: schedule a reindex on search after changes.",
   "agents.defaults.memorySearch.sync.watch": "Watch memory files for changes (chokidar).",
+  "agents.defaults.memorySearch.sync.sessions.deltaBytes":
+    "Minimum appended bytes before session transcripts trigger reindex (default: 100000).",
+  "agents.defaults.memorySearch.sync.sessions.deltaMessages":
+    "Minimum appended JSONL lines before session transcripts trigger reindex (default: 50).",
   "plugins.enabled": "Enable plugin/extension loading (default: true).",
   "plugins.allow": "Optional allowlist of plugin ids; when set, only listed plugins load.",
   "plugins.deny": "Optional denylist of plugin ids; deny wins over allowlist.",
@@ -448,6 +559,8 @@ const FIELD_HELP: Record<string, string> = {
     "Resolved install directory (usually ~/.clawdbot/extensions/<id>).",
   "plugins.installs.*.version": "Version recorded at install time (if available).",
   "plugins.installs.*.installedAt": "ISO timestamp of last install/update.",
+  "agents.list.*.identity.avatar":
+    "Agent avatar (workspace-relative path, http(s) URL, or data URI).",
   "agents.defaults.model.primary": "Primary model (provider/model).",
   "agents.defaults.model.fallbacks":
     "Ordered fallback models (provider/model). Used when the primary model fails.",
@@ -479,6 +592,8 @@ const FIELD_HELP: Record<string, string> = {
     "Allow Telegram to write config in response to channel events/commands (default: true).",
   "channels.slack.configWrites":
     "Allow Slack to write config in response to channel events/commands (default: true).",
+  "channels.mattermost.configWrites":
+    "Allow Mattermost to write config in response to channel events/commands (default: true).",
   "channels.discord.configWrites":
     "Allow Discord to write config in response to channel events/commands (default: true).",
   "channels.whatsapp.configWrites":
@@ -534,6 +649,8 @@ const FIELD_HELP: Record<string, string> = {
     'Direct message access control ("pairing" recommended). "open" requires channels.signal.allowFrom=["*"].',
   "channels.imessage.dmPolicy":
     'Direct message access control ("pairing" recommended). "open" requires channels.imessage.allowFrom=["*"].',
+  "channels.bluebubbles.dmPolicy":
+    'Direct message access control ("pairing" recommended). "open" requires channels.bluebubbles.allowFrom=["*"].',
   "channels.discord.dm.policy":
     'Direct message access control ("pairing" recommended). "open" requires channels.discord.dm.allowFrom=["*"].',
   "channels.discord.retry.attempts":
@@ -542,14 +659,21 @@ const FIELD_HELP: Record<string, string> = {
   "channels.discord.retry.maxDelayMs": "Maximum retry delay cap in ms for Discord outbound calls.",
   "channels.discord.retry.jitter": "Jitter factor (0-1) applied to Discord retry delays.",
   "channels.discord.maxLinesPerMessage": "Soft max line count per Discord message (default: 17).",
+  "channels.discord.intents.presence":
+    "Enable the Guild Presences privileged intent. Must also be enabled in the Discord Developer Portal. Allows tracking user activities (e.g. Spotify). Default: false.",
+  "channels.discord.intents.guildMembers":
+    "Enable the Guild Members privileged intent. Must also be enabled in the Discord Developer Portal. Default: false.",
   "channels.slack.dm.policy":
     'Direct message access control ("pairing" recommended). "open" requires channels.slack.dm.allowFrom=["*"].',
 };
 
 const FIELD_PLACEHOLDERS: Record<string, string> = {
   "gateway.remote.url": "ws://host:18789",
+  "gateway.remote.tlsFingerprint": "sha256:ab12cd34…",
   "gateway.remote.sshTarget": "user@host",
   "gateway.controlUi.basePath": "/clawdbot",
+  "channels.mattermost.baseUrl": "https://chat.example.com",
+  "agents.list[].identity.avatar": "avatars/clawd.png",
 };
 
 const SENSITIVE_PATTERNS = [/token/i, /password/i, /secret/i, /api.?key/i];
@@ -702,6 +826,44 @@ function applyChannelHints(hints: ConfigUiHints, channels: ChannelUiMetadata[]):
   return next;
 }
 
+function listHeartbeatTargetChannels(channels: ChannelUiMetadata[]): string[] {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const id of CHANNEL_IDS) {
+    const normalized = id.trim().toLowerCase();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    ordered.push(normalized);
+  }
+  for (const channel of channels) {
+    const normalized = channel.id.trim().toLowerCase();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    ordered.push(normalized);
+  }
+  return ordered;
+}
+
+function applyHeartbeatTargetHints(
+  hints: ConfigUiHints,
+  channels: ChannelUiMetadata[],
+): ConfigUiHints {
+  const next: ConfigUiHints = { ...hints };
+  const channelList = listHeartbeatTargetChannels(channels);
+  const channelHelp = channelList.length ? ` Known channels: ${channelList.join(", ")}.` : "";
+  const help = `Delivery target ("last", "none", or a channel id).${channelHelp}`;
+  const paths = ["agents.defaults.heartbeat.target", "agents.list.*.heartbeat.target"];
+  for (const path of paths) {
+    const current = next[path] ?? {};
+    next[path] = {
+      ...current,
+      help: current.help ?? help,
+      placeholder: current.placeholder ?? "last",
+    };
+  }
+  return next;
+}
+
 function applyPluginSchemas(schema: ConfigSchema, plugins: PluginUiMetadata[]): ConfigSchema {
   const next = cloneSchema(schema);
   const root = asSchemaObject(next);
@@ -803,7 +965,10 @@ export function buildConfigSchema(params?: {
   const channels = params?.channels ?? [];
   if (plugins.length === 0 && channels.length === 0) return base;
   const mergedHints = applySensitiveHints(
-    applyChannelHints(applyPluginHints(base.uiHints, plugins), channels),
+    applyHeartbeatTargetHints(
+      applyChannelHints(applyPluginHints(base.uiHints, plugins), channels),
+      channels,
+    ),
   );
   const mergedSchema = applyChannelSchemas(applyPluginSchemas(base.schema, plugins), channels);
   return {

@@ -61,7 +61,14 @@ export function createSessionsSpawnTool(opts?: {
   agentSessionKey?: string;
   agentChannel?: GatewayMessageChannel;
   agentAccountId?: string;
+  agentTo?: string;
+  agentThreadId?: string | number;
+  agentGroupId?: string | null;
+  agentGroupChannel?: string | null;
+  agentGroupSpace?: string | null;
   sandboxed?: boolean;
+  /** Explicit agent ID override for cron/hook sessions where session key parsing may not work. */
+  requesterAgentIdOverride?: string;
 }): AnyAgentTool {
   return {
     label: "Sessions",
@@ -83,6 +90,8 @@ export function createSessionsSpawnTool(opts?: {
       const requesterOrigin = normalizeDeliveryContext({
         channel: opts?.agentChannel,
         accountId: opts?.agentAccountId,
+        to: opts?.agentTo,
+        threadId: opts?.agentThreadId,
       });
       const runTimeoutSeconds = (() => {
         const explicit =
@@ -122,7 +131,7 @@ export function createSessionsSpawnTool(opts?: {
       });
 
       const requesterAgentId = normalizeAgentId(
-        parseAgentSessionKey(requesterInternalKey)?.agentId,
+        opts?.requesterAgentIdOverride ?? parseAgentSessionKey(requesterInternalKey)?.agentId,
       );
       const targetAgentId = requestedAgentId
         ? normalizeAgentId(requestedAgentId)
@@ -149,7 +158,7 @@ export function createSessionsSpawnTool(opts?: {
         }
       }
       const childSessionKey = `agent:${targetAgentId}:subagent:${crypto.randomUUID()}`;
-      const shouldPatchSpawnedBy = opts?.sandboxed === true;
+      const spawnedByKey = requesterInternalKey;
       const targetAgentConfig = resolveAgentConfig(cfg, targetAgentId);
       const resolvedModel =
         normalizeModelSelection(modelOverride) ??
@@ -215,7 +224,10 @@ export function createSessionsSpawnTool(opts?: {
             thinking: thinkingOverride,
             timeout: runTimeoutSeconds > 0 ? runTimeoutSeconds : undefined,
             label: label || undefined,
-            spawnedBy: shouldPatchSpawnedBy ? requesterInternalKey : undefined,
+            spawnedBy: spawnedByKey,
+            groupId: opts?.agentGroupId ?? undefined,
+            groupChannel: opts?.agentGroupChannel ?? undefined,
+            groupSpace: opts?.agentGroupSpace ?? undefined,
           },
           timeoutMs: 10_000,
         })) as { runId?: string };

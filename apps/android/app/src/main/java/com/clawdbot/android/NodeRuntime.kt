@@ -12,6 +12,7 @@ import com.clawdbot.android.chat.ChatMessage
 import com.clawdbot.android.chat.ChatPendingToolCall
 import com.clawdbot.android.chat.ChatSessionEntry
 import com.clawdbot.android.chat.OutgoingAttachment
+import com.clawdbot.android.gateway.DeviceAuthStore
 import com.clawdbot.android.gateway.DeviceIdentityStore
 import com.clawdbot.android.gateway.GatewayClientInfo
 import com.clawdbot.android.gateway.GatewayConnectOptions
@@ -62,6 +63,7 @@ class NodeRuntime(context: Context) {
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
   val prefs = SecurePrefs(appContext)
+  private val deviceAuthStore = DeviceAuthStore(prefs)
   val canvas = CanvasController()
   val camera = CameraCaptureManager(appContext)
   val location = LocationCaptureManager(appContext)
@@ -153,6 +155,7 @@ class NodeRuntime(context: Context) {
     GatewaySession(
       scope = scope,
       identityStore = identityStore,
+      deviceAuthStore = deviceAuthStore,
       onConnected = { name, remote, mainSessionKey ->
         operatorConnected = true
         operatorStatusText = "Connected"
@@ -188,6 +191,7 @@ class NodeRuntime(context: Context) {
     GatewaySession(
       scope = scope,
       identityStore = identityStore,
+      deviceAuthStore = deviceAuthStore,
       onConnected = { _, _, _ ->
         nodeConnected = true
         nodeStatusText = "Connected"
@@ -498,6 +502,13 @@ class NodeRuntime(context: Context) {
       .ifEmpty { null }
   }
 
+  private fun buildUserAgent(): String {
+    val version = resolvedVersionName()
+    val release = Build.VERSION.RELEASE?.trim().orEmpty()
+    val releaseLabel = if (release.isEmpty()) "unknown" else release
+    return "ClawdbotAndroid/$version (Android $releaseLabel; SDK ${Build.VERSION.SDK_INT})"
+  }
+
   private fun buildClientInfo(clientId: String, clientMode: String): GatewayClientInfo {
     return GatewayClientInfo(
       id = clientId,
@@ -518,7 +529,8 @@ class NodeRuntime(context: Context) {
       caps = buildCapabilities(),
       commands = buildInvokeCommands(),
       permissions = emptyMap(),
-      client = buildClientInfo(clientId = "node-host", clientMode = "node"),
+      client = buildClientInfo(clientId = "clawdbot-android", clientMode = "node"),
+      userAgent = buildUserAgent(),
     )
   }
 
@@ -530,6 +542,7 @@ class NodeRuntime(context: Context) {
       commands = emptyList(),
       permissions = emptyMap(),
       client = buildClientInfo(clientId = "clawdbot-control-ui", clientMode = "ui"),
+      userAgent = buildUserAgent(),
     )
   }
 

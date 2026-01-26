@@ -24,7 +24,7 @@ The prompt is intentionally compact and uses fixed sections:
 - **Current Date & Time**: user-local time, timezone, and time format.
 - **Reply Tags**: optional reply tag syntax for supported providers.
 - **Heartbeats**: heartbeat prompt and ack behavior.
-- **Runtime**: host, OS, node, model, thinking level (one line).
+- **Runtime**: host, OS, node, model, repo root (when detected), thinking level (one line).
 - **Reasoning**: current visibility level + /reasoning toggle hint.
 
 ## Prompt modes
@@ -66,12 +66,12 @@ To inspect how much each injected file contributes (raw vs injected, truncation,
 
 ## Time handling
 
-The system prompt includes a dedicated **Current Date & Time** section when user
-time or timezone is known. It is explicit about:
+The system prompt includes a dedicated **Current Date & Time** section when the
+user timezone is known. To keep the prompt cache-stable, it now only includes
+the **time zone** (no dynamic clock or time format).
 
-- The user’s **local time** (already converted).
-- The **time zone** used for the conversion.
-- The **time format** (12-hour / 24-hour).
+Use `session_status` when the agent needs the current time; the status card
+includes a timestamp line.
 
 Configure with:
 

@@ -14,7 +14,7 @@ export type AnnounceTarget = {
   channel: string;
   to: string;
   accountId?: string;
-  messageThreadId?: number;
+  threadId?: string; // Forum topic/thread ID (Telegram topics, Discord threads, etc.)
 };
 
 export function resolveAnnounceTargetFromKey(sessionKey: string): AnnounceTarget | null {
@@ -24,16 +24,20 @@ export function resolveAnnounceTargetFromKey(sessionKey: string): AnnounceTarget
   const [channelRaw, kind, ...rest] = parts;
   if (kind !== "group" && kind !== "channel") return null;
 
-  // Extract topic/thread ID from rest (e.g., ["-1003455795513", "topic", "8"])
-  let messageThreadId: number | undefined;
+  // Extract topic/thread ID from rest (supports both :topic: and :thread:)
+  // Telegram uses :topic:, other platforms use :thread:
+  let threadId: string | undefined;
   const restJoined = rest.join(":");
   const topicMatch = restJoined.match(/:topic:(\d+)$/);
-  if (topicMatch) {
-    messageThreadId = parseInt(topicMatch[1], 10);
+  const threadMatch = restJoined.match(/:thread:(\d+)$/);
+  const match = topicMatch || threadMatch;
+
+  if (match) {
+    threadId = match[1]; // Keep as string to match AgentCommandOpts.threadId
   }
 
-  // Remove :topic:N suffix from ID for target
-  const id = topicMatch ? restJoined.replace(/:topic:\d+$/, "") : restJoined.trim();
+  // Remove :topic:N or :thread:N suffix from ID for target
+  const id = match ? restJoined.replace(/:(topic|thread):\d+$/, "") : restJoined.trim();
 
   if (!id) return null;
   if (!channelRaw) return null;
@@ -52,7 +56,7 @@ export function resolveAnnounceTargetFromKey(sessionKey: string): AnnounceTarget
   return {
     channel,
     to: normalized ?? kindTarget,
-    messageThreadId,
+    threadId,
   };
 }
 

@@ -72,6 +72,7 @@ const createRegistry = (channels: PluginRegistry["channels"]): PluginRegistry =>
   providers: [],
   gatewayHandlers: {},
   httpHandlers: [],
+  httpRoutes: [],
   cliRegistrars: [],
   services: [],
   diagnostics: [],
@@ -209,6 +210,22 @@ describe("routeReply", () => {
     expect(mocks.sendMessageSlack).toHaveBeenCalledWith("channel:C123", "hi", expect.any(Object));
   });
 
+  it("uses threadId for Slack when replyToId is missing", async () => {
+    mocks.sendMessageSlack.mockClear();
+    await routeReply({
+      payload: { text: "hi" },
+      channel: "slack",
+      to: "channel:C123",
+      threadId: "456.789",
+      cfg: {} as never,
+    });
+    expect(mocks.sendMessageSlack).toHaveBeenCalledWith(
+      "channel:C123",
+      "hi",
+      expect.objectContaining({ threadTs: "456.789" }),
+    );
+  });
+
   it("passes thread id to Telegram sends", async () => {
     mocks.sendMessageTelegram.mockClear();
     await routeReply({
@@ -252,6 +269,22 @@ describe("routeReply", () => {
       "channel:C123",
       "hi",
       expect.objectContaining({ threadTs: "1710000000.0001" }),
+    );
+  });
+
+  it("uses threadId as threadTs for Slack when replyToId is missing", async () => {
+    mocks.sendMessageSlack.mockClear();
+    await routeReply({
+      payload: { text: "hi" },
+      channel: "slack",
+      to: "channel:C123",
+      threadId: "1710000000.9999",
+      cfg: {} as never,
+    });
+    expect(mocks.sendMessageSlack).toHaveBeenCalledWith(
+      "channel:C123",
+      "hi",
+      expect.objectContaining({ threadTs: "1710000000.9999" }),
     );
   });
 
@@ -344,6 +377,23 @@ describe("routeReply", () => {
           sessionKey: "agent:main:main",
           text: "hi",
         }),
+      }),
+    );
+  });
+
+  it("skips mirror data when mirror is false", async () => {
+    mocks.deliverOutboundPayloads.mockResolvedValue([]);
+    await routeReply({
+      payload: { text: "hi" },
+      channel: "slack",
+      to: "channel:C123",
+      sessionKey: "agent:main:main",
+      mirror: false,
+      cfg: {} as never,
+    });
+    expect(mocks.deliverOutboundPayloads).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mirror: undefined,
       }),
     );
   });

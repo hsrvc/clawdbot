@@ -20,6 +20,7 @@ import {
   applyOpencodeZenConfig,
   applyOpenrouterConfig,
   applySyntheticConfig,
+  applyVeniceConfig,
   applyVercelAiGatewayConfig,
   applyZaiConfig,
   setAnthropicApiKey,
@@ -30,12 +31,14 @@ import {
   setOpencodeZenApiKey,
   setOpenrouterApiKey,
   setSyntheticApiKey,
+  setVeniceApiKey,
   setVercelAiGatewayApiKey,
   setZaiApiKey,
 } from "../../onboard-auth.js";
 import type { AuthChoice, OnboardOptions } from "../../onboard-types.js";
 import { applyOpenAICodexModelDefault } from "../../openai-codex-model-default.js";
 import { resolveNonInteractiveApiKey } from "../api-keys.js";
+import { shortenHomePath } from "../../../utils.js";
 
 export async function applyNonInteractiveAuthChoice(params: {
   nextConfig: ClawdbotConfig;
@@ -172,7 +175,7 @@ export async function applyNonInteractiveAuthChoice(params: {
     const key = resolved.key;
     const result = upsertSharedEnvVar({ key: "OPENAI_API_KEY", value: key });
     process.env.OPENAI_API_KEY = key;
-    runtime.log(`Saved OPENAI_API_KEY to ${result.path}`);
+    runtime.log(`Saved OPENAI_API_KEY to ${shortenHomePath(result.path)}`);
     return nextConfig;
   }
 
@@ -269,6 +272,25 @@ export async function applyNonInteractiveAuthChoice(params: {
       mode: "api_key",
     });
     return applySyntheticConfig(nextConfig);
+  }
+
+  if (authChoice === "venice-api-key") {
+    const resolved = await resolveNonInteractiveApiKey({
+      provider: "venice",
+      cfg: baseConfig,
+      flagValue: opts.veniceApiKey,
+      flagName: "--venice-api-key",
+      envVar: "VENICE_API_KEY",
+      runtime,
+    });
+    if (!resolved) return null;
+    if (resolved.source !== "profile") await setVeniceApiKey(resolved.key);
+    nextConfig = applyAuthProfileConfig(nextConfig, {
+      profileId: "venice:default",
+      provider: "venice",
+      mode: "api_key",
+    });
+    return applyVeniceConfig(nextConfig);
   }
 
   if (

@@ -37,7 +37,7 @@ describe("initSessionState thread forking", () => {
     );
 
     const storePath = path.join(root, "sessions.json");
-    const parentSessionKey = "agent:main:slack:channel:C1";
+    const parentSessionKey = "agent:main:slack:channel:c1";
     await saveSessionStore(storePath, {
       [parentSessionKey]: {
         sessionId: parentSessionId,
@@ -50,7 +50,7 @@ describe("initSessionState thread forking", () => {
       session: { store: storePath },
     } as ClawdbotConfig;
 
-    const threadSessionKey = "agent:main:slack:channel:C1:thread:123";
+    const threadSessionKey = "agent:main:slack:channel:c1:thread:123";
     const threadLabel = "Slack thread #general: starter";
     const result = await initSessionState({
       ctx: {
@@ -117,7 +117,7 @@ describe("initSessionState RawBody", () => {
       Body: `[Chat messages since your last reply - for context]\n[WhatsApp ...] Someone: hello\n\n[Current message - respond to this]\n[WhatsApp ...] Jake: /status\n[from: Jake McInteer (+6421807830)]`,
       RawBody: "/status",
       ChatType: "group",
-      SessionKey: "agent:main:whatsapp:group:G1",
+      SessionKey: "agent:main:whatsapp:group:g1",
     };
 
     const result = await initSessionState({
@@ -138,7 +138,7 @@ describe("initSessionState RawBody", () => {
       Body: `[Context]\nJake: /new\n[from: Jake]`,
       RawBody: "/new",
       ChatType: "group",
-      SessionKey: "agent:main:whatsapp:group:G1",
+      SessionKey: "agent:main:whatsapp:group:g1",
     };
 
     const result = await initSessionState({
@@ -151,6 +151,34 @@ describe("initSessionState RawBody", () => {
     expect(result.bodyStripped).toBe("");
   });
 
+  it("preserves argument casing while still matching reset triggers case-insensitively", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-rawbody-reset-case-"));
+    const storePath = path.join(root, "sessions.json");
+
+    const cfg = {
+      session: {
+        store: storePath,
+        resetTriggers: ["/new"],
+      },
+    } as ClawdbotConfig;
+
+    const ctx = {
+      RawBody: "/NEW KeepThisCase",
+      ChatType: "direct",
+      SessionKey: "agent:main:whatsapp:dm:s1",
+    };
+
+    const result = await initSessionState({
+      ctx,
+      cfg,
+      commandAuthorized: true,
+    });
+
+    expect(result.isNewSession).toBe(true);
+    expect(result.bodyStripped).toBe("KeepThisCase");
+    expect(result.triggerBodyNormalized).toBe("/NEW KeepThisCase");
+  });
+
   it("falls back to Body when RawBody is undefined", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-rawbody-fallback-"));
     const storePath = path.join(root, "sessions.json");
@@ -158,7 +186,7 @@ describe("initSessionState RawBody", () => {
 
     const ctx = {
       Body: "/status",
-      SessionKey: "agent:main:whatsapp:dm:S1",
+      SessionKey: "agent:main:whatsapp:dm:s1",
     };
 
     const result = await initSessionState({
@@ -178,7 +206,7 @@ describe("initSessionState reset policy", () => {
     try {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-reset-daily-"));
       const storePath = path.join(root, "sessions.json");
-      const sessionKey = "agent:main:whatsapp:dm:S1";
+      const sessionKey = "agent:main:whatsapp:dm:s1";
       const existingSessionId = "daily-session-id";
 
       await saveSessionStore(storePath, {
@@ -208,7 +236,7 @@ describe("initSessionState reset policy", () => {
     try {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-reset-daily-edge-"));
       const storePath = path.join(root, "sessions.json");
-      const sessionKey = "agent:main:whatsapp:dm:S-edge";
+      const sessionKey = "agent:main:whatsapp:dm:s-edge";
       const existingSessionId = "daily-edge-session";
 
       await saveSessionStore(storePath, {
@@ -238,7 +266,7 @@ describe("initSessionState reset policy", () => {
     try {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-reset-idle-"));
       const storePath = path.join(root, "sessions.json");
-      const sessionKey = "agent:main:whatsapp:dm:S2";
+      const sessionKey = "agent:main:whatsapp:dm:s2";
       const existingSessionId = "idle-session-id";
 
       await saveSessionStore(storePath, {
@@ -273,7 +301,7 @@ describe("initSessionState reset policy", () => {
     try {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-reset-thread-"));
       const storePath = path.join(root, "sessions.json");
-      const sessionKey = "agent:main:slack:channel:C1:thread:123";
+      const sessionKey = "agent:main:slack:channel:c1:thread:123";
       const existingSessionId = "thread-session-id";
 
       await saveSessionStore(storePath, {
@@ -309,7 +337,7 @@ describe("initSessionState reset policy", () => {
     try {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-reset-thread-nosuffix-"));
       const storePath = path.join(root, "sessions.json");
-      const sessionKey = "agent:main:discord:channel:C1";
+      const sessionKey = "agent:main:discord:channel:c1";
       const existingSessionId = "thread-nosuffix";
 
       await saveSessionStore(storePath, {
@@ -344,7 +372,7 @@ describe("initSessionState reset policy", () => {
     try {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-reset-type-default-"));
       const storePath = path.join(root, "sessions.json");
-      const sessionKey = "agent:main:whatsapp:dm:S4";
+      const sessionKey = "agent:main:whatsapp:dm:s4";
       const existingSessionId = "type-default-session";
 
       await saveSessionStore(storePath, {
@@ -379,7 +407,7 @@ describe("initSessionState reset policy", () => {
     try {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-reset-legacy-"));
       const storePath = path.join(root, "sessions.json");
-      const sessionKey = "agent:main:whatsapp:dm:S3";
+      const sessionKey = "agent:main:whatsapp:dm:s3";
       const existingSessionId = "legacy-session-id";
 
       await saveSessionStore(storePath, {
@@ -406,5 +434,44 @@ describe("initSessionState reset policy", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("initSessionState channel reset overrides", () => {
+  it("uses channel-specific reset policy when configured", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-channel-idle-"));
+    const storePath = path.join(root, "sessions.json");
+    const sessionKey = "agent:main:discord:dm:123";
+    const sessionId = "session-override";
+    const updatedAt = Date.now() - (10080 - 1) * 60_000;
+
+    await saveSessionStore(storePath, {
+      [sessionKey]: {
+        sessionId,
+        updatedAt,
+      },
+    });
+
+    const cfg = {
+      session: {
+        store: storePath,
+        idleMinutes: 60,
+        resetByType: { dm: { mode: "idle", idleMinutes: 10 } },
+        resetByChannel: { discord: { mode: "idle", idleMinutes: 10080 } },
+      },
+    } as ClawdbotConfig;
+
+    const result = await initSessionState({
+      ctx: {
+        Body: "Hello",
+        SessionKey: sessionKey,
+        Provider: "discord",
+      },
+      cfg,
+      commandAuthorized: true,
+    });
+
+    expect(result.isNewSession).toBe(false);
+    expect(result.sessionEntry.sessionId).toBe(sessionId);
   });
 });

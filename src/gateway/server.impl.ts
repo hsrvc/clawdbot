@@ -4,6 +4,7 @@ import { registerSkillsChangeListener } from "../agents/skills/refresh.js";
 import type { CanvasHostServer } from "../canvas-host/server.js";
 import { type ChannelId, listChannelPlugins } from "../channels/plugins/index.js";
 import { createDefaultDeps } from "../cli/deps.js";
+import { formatCliCommand } from "../cli/command-format.js";
 import {
   CONFIG_PATH_CLAWDBOT,
   isNixMode,
@@ -12,6 +13,9 @@ import {
   readConfigFileSnapshot,
   writeConfigFile,
 } from "../config/config.js";
+import { isDiagnosticsEnabled } from "../infra/diagnostic-events.js";
+import { logAcceptedEnvOption } from "../infra/env.js";
+import { applyPluginAutoEnable } from "../config/plugin-auto-enable.js";
 import { clearAgentRunContext, onAgentEvent } from "../infra/agent-events.js";
 import { onHeartbeatEvent } from "../infra/heartbeat-events.js";
 import { startHeartbeatRunner } from "../infra/heartbeat-runner.js";
@@ -24,6 +28,7 @@ import {
 } from "../infra/skills-remote.js";
 import { scheduleGatewayUpdateCheck } from "../infra/update-startup.js";
 import { setGatewaySigusr1RestartPolicy } from "../infra/restart.js";
+import { startDiagnosticHeartbeat, stopDiagnosticHeartbeat } from "../logging/diagnostic.js";
 import { createSubsystemLogger, runtimeForLogger } from "../logging/subsystem.js";
 import type { PluginServicesHandle } from "../plugins/services.js";
 import type { RuntimeEnv } from "../runtime.js";
@@ -39,6 +44,7 @@ import {
 import { startGatewayDiscovery } from "./server-discovery-runtime.js";
 import { ExecApprovalManager } from "./exec-approval-manager.js";
 import { createExecApprovalHandlers } from "./server-methods/exec-approval.js";
+import { createExecApprovalForwarder } from "../infra/exec-approval-forwarder.js";
 import type { startBrowserControlServerIfEnabled } from "./server-browser.js";
 import { createChannelManager } from "./server-channels.js";
 import { createAgentEventHandler } from "./server-chat.js";
@@ -93,7 +99,7 @@ export type GatewayServerOptions = {
    * - loopback: 127.0.0.1
    * - lan: 0.0.0.0
    * - tailnet: bind only to the Tailscale IPv4 address (100.64.0.0/10)
-   * - auto: prefer tailnet, else LAN
+   * - auto: prefer loopback, else LAN
    */
   bind?: import("../config/config.js").GatewayBindMode;
   /**
@@ -111,6 +117,11 @@ export type GatewayServerOptions = {
    * Default: config `gateway.http.endpoints.chatCompletions.enabled` (or false when absent).
    */
   openAiChatCompletionsEnabled?: boolean;
+  /**
+   * If false, do not serve `POST /v1/responses` (OpenResponses API).
+   * Default: config `gateway.http.endpoints.responses.enabled` (or false when absent).
+   */
+  openResponsesEnabled?: boolean;
   /**
    * Override gateway auth configuration (merges with config).
    */
@@ -139,6 +150,14 @@ export async function startGatewayServer(
 ): Promise<GatewayServer> {
   // Ensure all default port derivations (browser/canvas) see the actual runtime port.
   process.env.CLAWDBOT_GATEWAY_PORT = String(port);
+  logAcceptedEnvOption({
+    key: "CLAWDBOT_RAW_STREAM",
+    description: "raw stream logging enabled",
+  });
+  logAcceptedEnvOption({
+    key: "CLAWDBOT_RAW_STREAM_PATH",
+    description: "raw stream log path override",
+  });
 
   let configSnapshot = await readConfigFileSnapshot();
   if (configSnapshot.legacyIssues.length > 0) {
@@ -150,7 +169,7 @@ export async function startGatewayServer(
     const { config: migrated, changes } = migrateLegacyConfig(configSnapshot.parsed);
     if (!migrated) {
       throw new Error(
-        'Legacy config entries detected but auto-migration failed. Run "clawdbot doctor" to migrate.',
+        `Legacy config entries detected but auto-migration failed. Run "${formatCliCommand("clawdbot doctor")}" to migrate.`,
       );
     }
     await writeConfigFile(migrated);
@@ -172,11 +191,29 @@ export async function startGatewayServer(
             .join("\n")
         : "Unknown validation issue.";
     throw new Error(
-      `Invalid config at ${configSnapshot.path}.\n${issues}\nRun "clawdbot doctor" to repair, then retry.`,
+      `Invalid config at ${configSnapshot.path}.\n${issues}\nRun "${formatCliCommand("clawdbot doctor")}" to repair, then retry.`,
     );
   }
 
+  const autoEnable = applyPluginAutoEnable({ config: configSnapshot.config, env: process.env });
+  if (autoEnable.changes.length > 0) {
+    try {
+      await writeConfigFile(autoEnable.config);
+      log.info(
+        `gateway: auto-enabled plugins:\n${autoEnable.changes
+          .map((entry) => `- ${entry}`)
+          .join("\n")}`,
+      );
+    } catch (err) {
+      log.warn(`gateway: failed to persist plugin auto-enable changes: ${String(err)}`);
+    }
+  }
+
   const cfgAtStart = loadConfig();
+  const diagnosticsEnabled = isDiagnosticsEnabled(cfgAtStart);
+  if (diagnosticsEnabled) {
+    startDiagnosticHeartbeat();
+  }
   setGatewaySigusr1RestartPolicy({ allowExternal: cfgAtStart.commands?.restart === true });
   initSubagentRegistry();
   const defaultAgentId = resolveDefaultAgentId(cfgAtStart);
@@ -205,6 +242,7 @@ export async function startGatewayServer(
     host: opts.host,
     controlUiEnabled: opts.controlUiEnabled,
     openAiChatCompletionsEnabled: opts.openAiChatCompletionsEnabled,
+    openResponsesEnabled: opts.openResponsesEnabled,
     auth: opts.auth,
     tailscale: opts.tailscale,
   });
@@ -212,6 +250,8 @@ export async function startGatewayServer(
     bindHost,
     controlUiEnabled,
     openAiChatCompletionsEnabled,
+    openResponsesEnabled,
+    openResponsesConfig,
     controlUiBasePath,
     resolvedAuth,
     tailscaleConfig,
@@ -232,6 +272,8 @@ export async function startGatewayServer(
   const {
     canvasHost,
     httpServer,
+    httpServers,
+    httpBindHosts,
     wss,
     clients,
     broadcast,
@@ -250,6 +292,8 @@ export async function startGatewayServer(
     controlUiEnabled,
     controlUiBasePath,
     openAiChatCompletionsEnabled,
+    openResponsesEnabled,
+    openResponsesConfig,
     resolvedAuth,
     gatewayTls,
     hooksConfig: () => hooksConfig,
@@ -259,6 +303,7 @@ export async function startGatewayServer(
     canvasHostEnabled,
     allowCanvasHostInTests: opts.allowCanvasHostInTests,
     logCanvas,
+    log,
     logHooks,
     logPlugins,
   });
@@ -306,15 +351,27 @@ export async function startGatewayServer(
       ? { enabled: true, fingerprintSha256: gatewayTls.fingerprintSha256 }
       : undefined,
     wideAreaDiscoveryEnabled: cfgAtStart.discovery?.wideArea?.enabled === true,
+    tailscaleMode,
+    mdnsMode: cfgAtStart.discovery?.mdns?.mode,
     logDiscovery,
   });
   bonjourStop = discovery.bonjourStop;
 
   setSkillsRemoteRegistry(nodeRegistry);
   void primeRemoteSkillsCache();
-  registerSkillsChangeListener(() => {
-    const latest = loadConfig();
-    void refreshRemoteBinsForConnectedNodes(latest);
+  // Debounce skills-triggered node probes to avoid feedback loops and rapid-fire invokes.
+  // Skills changes can happen in bursts (e.g., file watcher events), and each probe
+  // takes time to complete. A 30-second delay ensures we batch changes together.
+  let skillsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  const skillsRefreshDelayMs = 30_000;
+  const skillsChangeUnsub = registerSkillsChangeListener((event) => {
+    if (event.reason === "remote-node") return;
+    if (skillsRefreshTimer) clearTimeout(skillsRefreshTimer);
+    skillsRefreshTimer = setTimeout(() => {
+      skillsRefreshTimer = null;
+      const latest = loadConfig();
+      void refreshRemoteBinsForConnectedNodes(latest);
+    }, skillsRefreshDelayMs);
   });
 
   const { tickInterval, healthInterval, dedupeCleanup } = startGatewayMaintenanceTimers({
@@ -354,7 +411,10 @@ export async function startGatewayServer(
   void cron.start().catch((err) => logCron.error(`failed to start: ${String(err)}`));
 
   const execApprovalManager = new ExecApprovalManager();
-  const execApprovalHandlers = createExecApprovalHandlers(execApprovalManager);
+  const execApprovalForwarder = createExecApprovalForwarder();
+  const execApprovalHandlers = createExecApprovalHandlers(execApprovalManager, {
+    forwarder: execApprovalForwarder,
+  });
 
   const canvasHostServerPort = (canvasHostServer as CanvasHostServer | null)?.port;
 
@@ -417,6 +477,7 @@ export async function startGatewayServer(
   logGatewayStartup({
     cfg: cfgAtStart,
     bindHost,
+    bindHosts: httpBindHosts,
     port,
     tlsEnabled: gatewayTls.enabled,
     log,
@@ -505,7 +566,20 @@ export async function startGatewayServer(
     browserControl,
     wss,
     httpServer,
+    httpServers,
   });
 
-  return { close };
+  return {
+    close: async (opts) => {
+      if (diagnosticsEnabled) {
+        stopDiagnosticHeartbeat();
+      }
+      if (skillsRefreshTimer) {
+        clearTimeout(skillsRefreshTimer);
+        skillsRefreshTimer = null;
+      }
+      skillsChangeUnsub();
+      await close(opts);
+    },
+  };
 }

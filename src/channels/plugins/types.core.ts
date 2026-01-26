@@ -31,6 +31,10 @@ export type ChannelSetupInput = {
   httpUrl?: string;
   httpHost?: string;
   httpPort?: string;
+  webhookPath?: string;
+  webhookUrl?: string;
+  audienceType?: string;
+  audience?: string;
   useEnv?: boolean;
   homeserver?: string;
   userId?: string;
@@ -38,6 +42,12 @@ export type ChannelSetupInput = {
   password?: string;
   deviceName?: string;
   initialSyncLimit?: number;
+  ship?: string;
+  url?: string;
+  code?: string;
+  groupChannels?: string[];
+  dmAllowlist?: string[];
+  autoDiscoverChannels?: boolean;
 };
 
 export type ChannelStatusIssue = {
@@ -73,10 +83,13 @@ export type ChannelMeta = {
   selectionDocsPrefix?: string;
   selectionDocsOmitLabel?: boolean;
   selectionExtras?: string[];
+  detailLabel?: string;
+  systemImage?: string;
   showConfigured?: boolean;
   quickstartAllowFrom?: boolean;
   forceAccountBinding?: boolean;
   preferSessionLookupForAnnounceTarget?: boolean;
+  preferOver?: string[];
 };
 
 export type ChannelAccountSnapshot = {
@@ -111,6 +124,11 @@ export type ChannelAccountSnapshot = {
   tokenSource?: string;
   botTokenSource?: string;
   appTokenSource?: string;
+  credentialSource?: string;
+  audienceType?: string;
+  audience?: string;
+  webhookPath?: string;
+  webhookUrl?: string;
   baseUrl?: string;
   allowUnmentionedGroups?: boolean;
   cliPath?: string | null;
@@ -143,6 +161,11 @@ export type ChannelCapabilities = {
   chatTypes: Array<NormalizedChatType | "thread">;
   polls?: boolean;
   reactions?: boolean;
+  edit?: boolean;
+  unsend?: boolean;
+  reply?: boolean;
+  effects?: boolean;
+  groupManagement?: boolean;
   threads?: boolean;
   media?: boolean;
   nativeCommands?: boolean;
@@ -189,6 +212,7 @@ export type ChannelThreadingAdapter = {
   resolveReplyToMode?: (params: {
     cfg: ClawdbotConfig;
     accountId?: string | null;
+    chatType?: string | null;
   }) => "off" | "first" | "all";
   allowTagsWhenOff?: boolean;
   buildToolContext?: (params: {
@@ -201,8 +225,11 @@ export type ChannelThreadingAdapter = {
 
 export type ChannelThreadingContext = {
   Channel?: string;
+  From?: string;
   To?: string;
+  ChatType?: string;
   ReplyToId?: string;
+  ReplyToIdFull?: string;
   ThreadLabel?: string;
   MessageThreadId?: string | number;
 };
@@ -213,6 +240,12 @@ export type ChannelThreadingToolContext = {
   currentThreadTs?: string;
   replyToMode?: "off" | "first" | "all";
   hasRepliedRef?: { value: boolean };
+  /**
+   * When true, skip cross-context decoration (e.g., "[from X]" prefix).
+   * Use this for direct tool invocations where the agent is composing a new message,
+   * not forwarding/relaying a message from another conversation.
+   */
+  skipCrossContextDecoration?: boolean;
 };
 
 export type ChannelMessagingAdapter = {
@@ -226,6 +259,10 @@ export type ChannelMessagingAdapter = {
     display?: string;
     kind?: ChannelDirectoryEntryKind;
   }) => string;
+};
+
+export type ChannelAgentPromptAdapter = {
+  messageToolHints?: (params: { cfg: ClawdbotConfig; accountId?: string | null }) => string[];
 };
 
 export type ChannelDirectoryEntryKind = "user" | "group" | "channel";
@@ -269,6 +306,7 @@ export type ChannelMessageActionAdapter = {
   listActions?: (params: { cfg: ClawdbotConfig }) => ChannelMessageActionName[];
   supportsAction?: (params: { action: ChannelMessageActionName }) => boolean;
   supportsButtons?: (params: { cfg: ClawdbotConfig }) => boolean;
+  supportsCards?: (params: { cfg: ClawdbotConfig }) => boolean;
   extractToolSend?: (params: { args: Record<string, unknown> }) => ChannelToolSend | null;
   handleAction?: (ctx: ChannelMessageActionContext) => Promise<AgentToolResult<unknown>>;
 };

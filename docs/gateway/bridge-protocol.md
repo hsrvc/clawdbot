@@ -14,6 +14,9 @@ should use the unified Gateway WebSocket protocol instead.
 If you are building an operator or node client, use the
 [Gateway protocol](/gateway/protocol).
 
+**Note:** Current Clawdbot builds no longer ship the TCP bridge listener; this document is kept for historical reference.
+Legacy `bridge.*` config keys are no longer part of the config schema.
+
 ## Why we have both
 
 - **Security boundary**: the bridge exposes a small allowlist instead of the
@@ -28,7 +31,7 @@ If you are building an operator or node client, use the
 
 - TCP, one JSON object per line (JSONL).
 - Optional TLS (when `bridge.tls.enabled` is true).
-- Gateway owns the listener (default `18790`).
+- Legacy default listener port was `18790` (current builds do not start a TCP bridge).
 
 When TLS is enabled, discovery TXT records include `bridgeTls=1` plus
 `bridgeTlsSha256` so nodes can pin the certificate.
@@ -54,12 +57,12 @@ Gateway → Client:
 - `event`: chat updates for subscribed sessions
 - `ping` / `pong`: keepalive
 
-Exact allowlist is enforced in `src/gateway/server-bridge.ts`.
+Legacy allowlist enforcement lived in `src/gateway/server-bridge.ts` (removed).
 
 ## Exec lifecycle events
 
-Nodes can emit `exec.started`, `exec.finished`, or `exec.denied` events to surface
-system.run activity. These are mapped to system events in the gateway.
+Nodes can emit `exec.finished` or `exec.denied` events to surface system.run activity.
+These are mapped to system events in the gateway. (Legacy nodes may still emit `exec.started`.)
 
 Payload fields (all optional unless noted):
 - `sessionKey` (required): agent session to receive the system event.

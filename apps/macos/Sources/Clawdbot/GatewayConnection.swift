@@ -11,10 +11,12 @@ enum GatewayAgentChannel: String, Codable, CaseIterable, Sendable {
     case whatsapp
     case telegram
     case discord
+    case googlechat
     case slack
     case signal
     case imessage
     case msteams
+    case bluebubbles
     case webchat
 
     init(raw: String?) {
@@ -68,6 +70,7 @@ actor GatewayConnection {
         case channelsLogout = "channels.logout"
         case modelsList = "models.list"
         case chatHistory = "chat.history"
+        case sessionsPreview = "sessions.preview"
         case chatSend = "chat.send"
         case chatAbort = "chat.abort"
         case skillsStatus = "skills.status"
@@ -144,6 +147,27 @@ actor GatewayConnection {
                         return try await client.request(method: method, params: params, timeoutMs: timeoutMs)
                     } catch {
                         lastError = error
+                    }
+                }
+
+                let nsError = lastError as NSError
+                if nsError.domain == URLError.errorDomain,
+                   let fallback = await GatewayEndpointStore.shared.maybeFallbackToTailnet(from: cfg.url)
+                {
+                    await self.configure(url: fallback.url, token: fallback.token, password: fallback.password)
+                    for delayMs in [150, 400, 900] {
+                        try await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
+                        do {
+                            guard let client = self.client else {
+                                throw NSError(
+                                    domain: "Gateway",
+                                    code: 0,
+                                    userInfo: [NSLocalizedDescriptionKey: "gateway not configured"])
+                            }
+                            return try await client.request(method: method, params: params, timeoutMs: timeoutMs)
+                        } catch {
+                            lastError = error
+                        }
                     }
                 }
 
@@ -227,6 +251,11 @@ actor GatewayConnection {
         await self.configure(url: cfg.url, token: cfg.token, password: cfg.password)
     }
 
+    func authSource() async -> GatewayAuthSource? {
+        guard let client else { return nil }
+        return await client.authSource()
+    }
+
     func shutdown() async {
         if let client {
             await client.shutdown()
@@ -243,9 +272,9 @@ actor GatewayConnection {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private func sessionDefaultString(_ defaults: [String: AnyCodable]?, key: String) -> String {
-        (defaults?[key]?.stringValue ?? "")
-            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+    private func sessionDefaultString(_ defaults: [String: ClawdbotProtocol.AnyCodable]?, key: String) -> String {
+        let raw = defaults?[key]?.value as? String
+        return (raw ?? "").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
     }
 
     func cachedMainSessionKey() -> String? {
@@ -511,6 +540,30 @@ extension GatewayConnection {
         if let apiKey { params["apiKey"] = AnyCodable(apiKey) }
         if let env, !env.isEmpty { params["env"] = AnyCodable(env) }
         return try await self.requestDecoded(method: .skillsUpdate, params: params)
+    }
+
+    // MARK: - Sessions
+
+    func sessionsPreview(
+        keys: [String],
+        limit: Int? = nil,
+        maxChars: Int? = nil,
+        timeoutMs: Int? = nil) async throws -> ClawdbotSessionsPreviewPayload
+    {
+        let resolvedKeys = keys
+            .map { self.canonicalizeSessionKey($0) }
+            .filter { !$0.isEmpty }
+        if resolvedKeys.isEmpty {
+            return ClawdbotSessionsPreviewPayload(ts: 0, previews: [])
+        }
+        var params: [String: AnyCodable] = ["keys": AnyCodable(resolvedKeys)]
+        if let limit { params["limit"] = AnyCodable(limit) }
+        if let maxChars { params["maxChars"] = AnyCodable(maxChars) }
+        let timeout = timeoutMs.map { Double($0) }
+        return try await self.requestDecoded(
+            method: .sessionsPreview,
+            params: params,
+            timeoutMs: timeout)
     }
 
     // MARK: - Chat

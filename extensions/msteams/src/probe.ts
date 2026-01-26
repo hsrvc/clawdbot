@@ -65,7 +65,7 @@ export async function probeMSTeams(cfg?: MSTeamsConfig): Promise<ProbeMSTeamsRes
   try {
     const { sdk, authConfig } = await loadMSTeamsSdkWithAuth(creds);
     const tokenProvider = new sdk.MsalTokenProvider(authConfig);
-    await tokenProvider.getAccessToken("https://api.botframework.com/.default");
+    await tokenProvider.getAccessToken("https://api.botframework.com");
     let graph:
       | {
           ok: boolean;
@@ -76,7 +76,7 @@ export async function probeMSTeams(cfg?: MSTeamsConfig): Promise<ProbeMSTeamsRes
       | undefined;
     try {
       const graphToken = await tokenProvider.getAccessToken(
-        "https://graph.microsoft.com/.default",
+        "https://graph.microsoft.com",
       );
       const accessToken = readAccessToken(graphToken);
       const payload = accessToken ? decodeJwtPayload(accessToken) : null;

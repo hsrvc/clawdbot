@@ -1,4 +1,5 @@
 import type { QueueDropPolicy, QueueMode, QueueModeByProvider } from "./types.queue.js";
+import type { TtsConfig } from "./types.tts.js";
 
 export type GroupChatConfig = {
   mentionPatterns?: string[];
@@ -13,20 +14,13 @@ export type QueueConfig = {
   mode?: QueueMode;
   byChannel?: QueueModeByProvider;
   debounceMs?: number;
+  /** Per-channel debounce overrides (ms). */
+  debounceMsByChannel?: InboundDebounceByProvider;
   cap?: number;
   drop?: QueueDropPolicy;
 };
 
-export type InboundDebounceByProvider = {
-  whatsapp?: number;
-  telegram?: number;
-  discord?: number;
-  slack?: number;
-  signal?: number;
-  imessage?: number;
-  msteams?: number;
-  webchat?: number;
-};
+export type InboundDebounceByProvider = Record<string, number>;
 
 export type InboundDebounceConfig = {
   debounceMs?: number;
@@ -88,6 +82,8 @@ export type MessagesConfig = {
   ackReactionScope?: "group-mentions" | "group-all" | "direct" | "all";
   /** Remove ack reaction after reply is sent (default: false). */
   removeAckAfterReply?: boolean;
+  /** Text-to-speech settings for outbound replies. */
+  tts?: TtsConfig;
 };
 
 export type NativeCommandsSetting = boolean | "auto";

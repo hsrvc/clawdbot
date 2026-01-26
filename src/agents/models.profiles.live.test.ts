@@ -11,7 +11,7 @@ import {
   isAnthropicRateLimitError,
 } from "./live-auth-keys.js";
 import { isModernModelRef } from "./live-model-filter.js";
-import { getApiKeyForModel } from "./model-auth.js";
+import { getApiKeyForModel, requireApiKey } from "./model-auth.js";
 import { ensureClawdbotModelsJson } from "./models-config.js";
 import { isRateLimitErrorMessage } from "./pi-embedded-helpers/errors.js";
 
@@ -66,6 +66,10 @@ function isModelNotFoundErrorMessage(raw: string): boolean {
 function isChatGPTUsageLimitErrorMessage(raw: string): boolean {
   const msg = raw.toLowerCase();
   return msg.includes("hit your chatgpt usage limit") && msg.includes("try again in");
+}
+
+function isInstructionsRequiredError(raw: string): boolean {
+  return /instructions are required/i.test(raw);
 }
 
 function toInt(value: string | undefined, fallback: number): number {
@@ -226,7 +230,7 @@ describeLive("live models (profile keys)", () => {
           const apiKey =
             model.provider === "anthropic" && anthropicKeys.length > 0
               ? anthropicKeys[attempt]
-              : apiKeyInfo.apiKey;
+              : requireApiKey(apiKeyInfo, model.provider);
           try {
             // Special regression: OpenAI requires replayed `reasoning` items for tool-only turns.
             if (
@@ -441,6 +445,15 @@ describeLive("live models (profile keys)", () => {
             ) {
               skipped.push({ model: id, reason: message });
               logProgress(`${progressLabel}: skip (chatgpt usage limit)`);
+              break;
+            }
+            if (
+              allowNotFoundSkip &&
+              model.provider === "openai-codex" &&
+              isInstructionsRequiredError(message)
+            ) {
+              skipped.push({ model: id, reason: message });
+              logProgress(`${progressLabel}: skip (instructions required)`);
               break;
             }
             logProgress(`${progressLabel}: failed`);

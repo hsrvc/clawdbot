@@ -26,6 +26,10 @@ Primary goals:
 - Keep the tool surface hard to misuse: sub-agents do **not** get session tools by default.
 - Avoid nested fan-out: sub-agents cannot spawn sub-agents.
 
+Cost note: each sub-agent has its **own** context and token usage. For heavy or repetitive
+tasks, set a cheaper model for sub-agents and keep your main agent on a higher-quality model.
+You can configure this via `agents.defaults.subagents.model` or per-agent overrides.
+
 ## Tool
 
 Use `sessions_spawn`:
@@ -69,7 +73,8 @@ Note: the merge is additive, so main profiles are always available as fallbacks.
 Sub-agents report back via an announce step:
 - The announce step runs inside the sub-agent session (not the requester session).
 - If the sub-agent replies exactly `ANNOUNCE_SKIP`, nothing is posted.
-- Otherwise the announce reply is posted to the requester chat channel via the gateway `send` method.
+- Otherwise the announce reply is posted to the requester chat channel via a follow-up `agent` call (`deliver=true`).
+- Announce replies preserve thread/topic routing when available (Slack threads, Telegram topics, Matrix threads).
 - Announce messages are normalized to a stable template:
   - `Status:` derived from the run outcome (`success`, `error`, `timeout`, or `unknown`).
   - `Result:` the summary content from the announce step (or `(not available)` if missing).
@@ -118,7 +123,7 @@ Override via config:
 
 Sub-agents use a dedicated in-process queue lane:
 - Lane name: `subagent`
-- Concurrency: `agents.defaults.subagents.maxConcurrent` (default `1`)
+- Concurrency: `agents.defaults.subagents.maxConcurrent` (default `8`)
 
 ## Stopping
 

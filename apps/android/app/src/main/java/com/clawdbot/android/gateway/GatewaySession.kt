@@ -49,11 +49,13 @@ data class GatewayConnectOptions(
   val commands: List<String>,
   val permissions: Map<String, Boolean>,
   val client: GatewayClientInfo,
+  val userAgent: String? = null,
 )
 
 class GatewaySession(
   private val scope: CoroutineScope,
   private val identityStore: DeviceIdentityStore,
+  private val deviceAuthStore: DeviceAuthStore,
   private val onConnected: (serverName: String?, remoteAddress: String?, mainSessionKey: String?) -> Unit,
   private val onDisconnected: (message: String) -> Unit,
   private val onEvent: (event: String, payloadJson: String?) -> Unit,
@@ -131,10 +133,17 @@ class GatewaySession(
 
   suspend fun sendNodeEvent(event: String, payloadJson: String?) {
     val conn = currentConnection ?: return
+    val parsedPayload = payloadJson?.let { parseJsonOrNull(it) }
     val params =
       buildJsonObject {
         put("event", JsonPrimitive(event))
-        if (payloadJson != null) put("payloadJSON", JsonPrimitive(payloadJson)) else put("payloadJSON", JsonNull)
+        if (parsedPayload != null) {
+          put("payload", parsedPayload)
+        } else if (payloadJson != null) {
+          put("payloadJSON", JsonPrimitive(payloadJson))
+        } else {
+          put("payloadJSON", JsonNull)
+        }
       }
     try {
       conn.request("node.event", params, timeoutMs = 8_000)
@@ -169,6 +178,7 @@ class GatewaySession(
     private val connectDeferred = CompletableDeferred<Unit>()
     private val closedDeferred = CompletableDeferred<Unit>()
     private val isClosed = AtomicBoolean(false)
+    private val connectNonceDeferred = CompletableDeferred<String?>()
     private val client: OkHttpClient = buildClient()
     private var socket: WebSocket? = null
     private val loggerTag = "ClawdbotGateway"
@@ -245,7 +255,8 @@ class GatewaySession(
       override fun onOpen(webSocket: WebSocket, response: Response) {
         scope.launch {
           try {
-            sendConnect()
+            val nonce = awaitConnectNonce()
+            sendConnect(nonce)
           } catch (err: Throwable) {
             connectDeferred.completeExceptionally(err)
             closeQuietly()
@@ -280,16 +291,30 @@ class GatewaySession(
       }
     }
 
-    private suspend fun sendConnect() {
-      val payload = buildConnectParams()
+    private suspend fun sendConnect(connectNonce: String?) {
+      val identity = identityStore.loadOrCreate()
+      val storedToken = deviceAuthStore.loadToken(identity.deviceId, options.role)
+      val trimmedToken = token?.trim().orEmpty()
+      val authToken = if (storedToken.isNullOrBlank()) trimmedToken else storedToken
+      val canFallbackToShared = !storedToken.isNullOrBlank() && trimmedToken.isNotBlank()
+      val payload = buildConnectParams(identity, connectNonce, authToken, password?.trim())
       val res = request("connect", payload, timeoutMs = 8_000)
       if (!res.ok) {
         val msg = res.error?.message ?: "connect failed"
+        if (canFallbackToShared) {
+          deviceAuthStore.clearToken(identity.deviceId, options.role)
+        }
         throw IllegalStateException(msg)
       }
       val payloadJson = res.payloadJson ?: throw IllegalStateException("connect failed: missing payload")
       val obj = json.parseToJsonElement(payloadJson).asObjectOrNull() ?: throw IllegalStateException("connect failed")
       val serverName = obj["server"].asObjectOrNull()?.get("host").asStringOrNull()
+      val authObj = obj["auth"].asObjectOrNull()
+      val deviceToken = authObj?.get("deviceToken").asStringOrNull()
+      val authRole = authObj?.get("role").asStringOrNull() ?: options.role
+      if (!deviceToken.isNullOrBlank()) {
+        deviceAuthStore.saveToken(identity.deviceId, authRole, deviceToken)
+      }
       val rawCanvas = obj["canvasHostUrl"].asStringOrNull()
       canvasHostUrl = normalizeCanvasHostUrl(rawCanvas, endpoint)
       val sessionDefaults =
@@ -300,7 +325,12 @@ class GatewaySession(
       connectDeferred.complete(Unit)
     }
 
-    private fun buildConnectParams(): JsonObject {
+    private fun buildConnectParams(
+      identity: DeviceIdentity,
+      connectNonce: String?,
+      authToken: String,
+      authPassword: String?,
+    ): JsonObject {
       val client = options.client
       val locale = Locale.getDefault().toLanguageTag()
       val clientObj =
@@ -315,22 +345,20 @@ class GatewaySession(
           client.modelIdentifier?.let { put("modelIdentifier", JsonPrimitive(it)) }
         }
 
-      val authToken = token?.trim().orEmpty()
-      val authPassword = password?.trim().orEmpty()
+      val password = authPassword?.trim().orEmpty()
       val authJson =
         when {
           authToken.isNotEmpty() ->
             buildJsonObject {
               put("token", JsonPrimitive(authToken))
             }
-          authPassword.isNotEmpty() ->
+          password.isNotEmpty() ->
             buildJsonObject {
-              put("password", JsonPrimitive(authPassword))
+              put("password", JsonPrimitive(password))
             }
           else -> null
         }
 
-      val identity = identityStore.loadOrCreate()
       val signedAtMs = System.currentTimeMillis()
       val payload =
         buildDeviceAuthPayload(
@@ -341,6 +369,7 @@ class GatewaySession(
           scopes = options.scopes,
           signedAtMs = signedAtMs,
           token = if (authToken.isNotEmpty()) authToken else null,
+          nonce = connectNonce,
         )
       val signature = identityStore.signPayload(payload, identity)
       val publicKey = identityStore.publicKeyBase64Url(identity)
@@ -351,6 +380,9 @@ class GatewaySession(
             put("publicKey", JsonPrimitive(publicKey))
             put("signature", JsonPrimitive(signature))
             put("signedAt", JsonPrimitive(signedAtMs))
+            if (!connectNonce.isNullOrBlank()) {
+              put("nonce", JsonPrimitive(connectNonce))
+            }
           }
         } else {
           null
@@ -377,6 +409,9 @@ class GatewaySession(
         authJson?.let { put("auth", it) }
         deviceJson?.let { put("device", it) }
         put("locale", JsonPrimitive(locale))
+        options.userAgent?.trim()?.takeIf { it.isNotEmpty() }?.let {
+          put("userAgent", JsonPrimitive(it))
+        }
       }
     }
 
@@ -403,12 +438,35 @@ class GatewaySession(
 
     private fun handleEvent(frame: JsonObject) {
       val event = frame["event"].asStringOrNull() ?: return
-      val payloadJson = frame["payload"]?.let { it.toString() }
+      val payloadJson =
+        frame["payload"]?.let { it.toString() } ?: frame["payloadJSON"].asStringOrNull()
+      if (event == "connect.challenge") {
+        val nonce = extractConnectNonce(payloadJson)
+        if (!connectNonceDeferred.isCompleted) {
+          connectNonceDeferred.complete(nonce)
+        }
+        return
+      }
       if (event == "node.invoke.request" && payloadJson != null && onInvoke != null) {
         handleInvokeEvent(payloadJson)
         return
       }
       onEvent(event, payloadJson)
+    }
+
+    private suspend fun awaitConnectNonce(): String? {
+      if (isLoopbackHost(endpoint.host)) return null
+      return try {
+        withTimeout(2_000) { connectNonceDeferred.await() }
+      } catch (_: Throwable) {
+        null
+      }
+    }
+
+    private fun extractConnectNonce(payloadJson: String?): String? {
+      if (payloadJson.isNullOrBlank()) return null
+      val obj = parseJsonOrNull(payloadJson)?.asObjectOrNull() ?: return null
+      return obj["nonce"].asStringOrNull()
     }
 
     private fun handleInvokeEvent(payloadJson: String) {
@@ -421,7 +479,9 @@ class GatewaySession(
       val id = payload["id"].asStringOrNull() ?: return
       val nodeId = payload["nodeId"].asStringOrNull() ?: return
       val command = payload["command"].asStringOrNull() ?: return
-      val params = payload["paramsJSON"].asStringOrNull()
+      val params =
+        payload["paramsJSON"].asStringOrNull()
+          ?: payload["params"]?.let { value -> if (value is JsonNull) null else value.toString() }
       val timeoutMs = payload["timeoutMs"].asLongOrNull()
       scope.launch {
         val result =
@@ -436,12 +496,17 @@ class GatewaySession(
     }
 
     private suspend fun sendInvokeResult(id: String, nodeId: String, result: InvokeResult) {
+      val parsedPayload = result.payloadJson?.let { parseJsonOrNull(it) }
       val params =
         buildJsonObject {
           put("id", JsonPrimitive(id))
           put("nodeId", JsonPrimitive(nodeId))
           put("ok", JsonPrimitive(result.ok))
-          if (result.payloadJson != null) put("payloadJSON", JsonPrimitive(result.payloadJson))
+          if (parsedPayload != null) {
+            put("payload", parsedPayload)
+          } else if (result.payloadJson != null) {
+            put("payloadJSON", JsonPrimitive(result.payloadJson))
+          }
           result.error?.let { err ->
             put(
               "error",
@@ -525,19 +590,26 @@ class GatewaySession(
     scopes: List<String>,
     signedAtMs: Long,
     token: String?,
+    nonce: String?,
   ): String {
     val scopeString = scopes.joinToString(",")
     val authToken = token.orEmpty()
-    return listOf(
-      "v1",
-      deviceId,
-      clientId,
-      clientMode,
-      role,
-      scopeString,
-      signedAtMs.toString(),
-      authToken,
-    ).joinToString("|")
+    val version = if (nonce.isNullOrBlank()) "v1" else "v2"
+    val parts =
+      mutableListOf(
+        version,
+        deviceId,
+        clientId,
+        clientMode,
+        role,
+        scopeString,
+        signedAtMs.toString(),
+        authToken,
+      )
+    if (!nonce.isNullOrBlank()) {
+      parts.add(nonce)
+    }
+    return parts.joinToString("|")
   }
 
   private fun normalizeCanvasHostUrl(raw: String?, endpoint: GatewayEndpoint): String? {
@@ -599,3 +671,13 @@ private fun JsonElement?.asLongOrNull(): Long? =
     is JsonPrimitive -> content.toLongOrNull()
     else -> null
   }
+
+private fun parseJsonOrNull(payload: String): JsonElement? {
+  val trimmed = payload.trim()
+  if (trimmed.isEmpty()) return null
+  return try {
+    Json.parseToJsonElement(trimmed)
+  } catch (_: Throwable) {
+    null
+  }
+}

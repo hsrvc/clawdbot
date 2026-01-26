@@ -8,9 +8,29 @@ export const SessionsListParamsSchema = Type.Object(
     activeMinutes: Type.Optional(Type.Integer({ minimum: 1 })),
     includeGlobal: Type.Optional(Type.Boolean()),
     includeUnknown: Type.Optional(Type.Boolean()),
+    /**
+     * Read first 8KB of each session transcript to derive title from first user message.
+     * Performs a file read per session - use `limit` to bound result set on large stores.
+     */
+    includeDerivedTitles: Type.Optional(Type.Boolean()),
+    /**
+     * Read last 16KB of each session transcript to extract most recent message preview.
+     * Performs a file read per session - use `limit` to bound result set on large stores.
+     */
+    includeLastMessage: Type.Optional(Type.Boolean()),
     label: Type.Optional(SessionLabelString),
     spawnedBy: Type.Optional(NonEmptyString),
     agentId: Type.Optional(NonEmptyString),
+    search: Type.Optional(Type.String()),
+  },
+  { additionalProperties: false },
+);
+
+export const SessionsPreviewParamsSchema = Type.Object(
+  {
+    keys: Type.Array(NonEmptyString, { minItems: 1 }),
+    limit: Type.Optional(Type.Integer({ minimum: 1 })),
+    maxChars: Type.Optional(Type.Integer({ minimum: 20 })),
   },
   { additionalProperties: false },
 );
@@ -18,6 +38,7 @@ export const SessionsListParamsSchema = Type.Object(
 export const SessionsResolveParamsSchema = Type.Object(
   {
     key: Type.Optional(NonEmptyString),
+    sessionId: Type.Optional(NonEmptyString),
     label: Type.Optional(SessionLabelString),
     agentId: Type.Optional(NonEmptyString),
     spawnedBy: Type.Optional(NonEmptyString),

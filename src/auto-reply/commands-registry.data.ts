@@ -132,16 +132,57 @@ function buildChatCommands(): ChatCommandDefinition[] {
       textAlias: "/commands",
     }),
     defineChatCommand({
+      key: "skill",
+      nativeName: "skill",
+      description: "Run a skill by name.",
+      textAlias: "/skill",
+      args: [
+        {
+          name: "name",
+          description: "Skill name",
+          type: "string",
+          required: true,
+        },
+        {
+          name: "input",
+          description: "Skill input",
+          type: "string",
+          captureRemaining: true,
+        },
+      ],
+    }),
+    defineChatCommand({
       key: "status",
       nativeName: "status",
       description: "Show current status.",
       textAlias: "/status",
     }),
     defineChatCommand({
+      key: "allowlist",
+      description: "List/add/remove allowlist entries.",
+      textAlias: "/allowlist",
+      acceptsArgs: true,
+      scope: "text",
+    }),
+    defineChatCommand({
+      key: "approve",
+      nativeName: "approve",
+      description: "Approve or deny exec requests.",
+      textAlias: "/approve",
+      acceptsArgs: true,
+    }),
+    defineChatCommand({
       key: "context",
       nativeName: "context",
       description: "Explain how context is built and used.",
       textAlias: "/context",
+      acceptsArgs: true,
+    }),
+    defineChatCommand({
+      key: "tts",
+      nativeName: "tts",
+      description: "Configure text-to-speech.",
+      textAlias: "/tts",
       acceptsArgs: true,
     }),
     defineChatCommand({
@@ -292,12 +333,14 @@ function buildChatCommands(): ChatCommandDefinition[] {
       nativeName: "reset",
       description: "Reset the current session.",
       textAlias: "/reset",
+      acceptsArgs: true,
     }),
     defineChatCommand({
       key: "new",
       nativeName: "new",
       description: "Start a new session.",
       textAlias: "/new",
+      acceptsArgs: true,
     }),
     defineChatCommand({
       key: "compact",
@@ -366,9 +409,9 @@ function buildChatCommands(): ChatCommandDefinition[] {
       args: [
         {
           name: "mode",
-          description: "on or off",
+          description: "on, off, ask, or full",
           type: "string",
-          choices: ["on", "off"],
+          choices: ["on", "off", "ask", "full"],
         },
       ],
       argsMenu: "auto",
@@ -399,6 +442,14 @@ function buildChatCommands(): ChatCommandDefinition[] {
           type: "string",
         },
       ],
+    }),
+    defineChatCommand({
+      key: "models",
+      nativeName: "models",
+      description: "List model providers or provider models.",
+      textAlias: "/models",
+      argsParsing: "none",
+      acceptsArgs: true,
     }),
     defineChatCommand({
       key: "queue",
@@ -470,7 +521,6 @@ function buildChatCommands(): ChatCommandDefinition[] {
   registerAlias(commands, "verbose", "/v");
   registerAlias(commands, "reasoning", "/reason");
   registerAlias(commands, "elevated", "/elev");
-  registerAlias(commands, "model", "/models");
 
   assertCommandRegistry(commands);
   return commands;

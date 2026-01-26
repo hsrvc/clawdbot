@@ -271,12 +271,13 @@ WhatsApp can automatically send emoji reactions to incoming messages immediately
 
 ## Limits
 - Outbound text is chunked to `channels.whatsapp.textChunkLimit` (default 4000).
+- Optional newline chunking: set `channels.whatsapp.chunkMode="newline"` to split on blank lines (paragraph boundaries) before length chunking.
 - Inbound media saves are capped by `channels.whatsapp.mediaMaxMb` (default 50 MB).
 - Outbound media items are capped by `agents.defaults.mediaMaxMb` (default 5 MB).
 
 ## Outbound send (text + media)
 - Uses active web listener; error if gateway not running.
-- Text chunking: 4k max per message (configurable via `channels.whatsapp.textChunkLimit`).
+- Text chunking: 4k max per message (configurable via `channels.whatsapp.textChunkLimit`, optional `channels.whatsapp.chunkMode`).
 - Media:
   - Image/video/audio/document supported.
   - Audio sent as PTT; `audio/ogg` => `audio/ogg; codecs=opus`.
@@ -285,6 +286,11 @@ WhatsApp can automatically send emoji reactions to incoming messages immediately
   - Animated GIFs: WhatsApp expects MP4 with `gifPlayback: true` for inline looping.
     - CLI: `clawdbot message send --media <mp4> --gif-playback`
     - Gateway: `send` params include `gifPlayback: true`
+
+## Voice notes (PTT audio)
+WhatsApp sends audio as **voice notes** (PTT bubble).
+- Best results: OGG/Opus. Clawdbot rewrites `audio/ogg` to `audio/ogg; codecs=opus`.
+- `[[audio_as_voice]]` is ignored for WhatsApp (audio already ships as voice note).
 
 ## Media limits + optimization
 - Default outbound cap: 5 MB (per media item).
@@ -329,6 +335,7 @@ WhatsApp can automatically send emoji reactions to incoming messages immediately
 - `agents.defaults.heartbeat.model` (optional override)
 - `agents.defaults.heartbeat.target`
 - `agents.defaults.heartbeat.to`
+- `agents.defaults.heartbeat.session`
 - `agents.list[].heartbeat.*` (per-agent overrides)
 - `session.*` (scope, idle, store, mainKey)
 - `web.enabled` (disable channel startup when false)

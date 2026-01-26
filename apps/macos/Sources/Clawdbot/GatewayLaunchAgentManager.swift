@@ -4,9 +4,44 @@ enum GatewayLaunchAgentManager {
     private static let logger = Logger(subsystem: "com.clawdbot", category: "gateway.launchd")
     private static let disableLaunchAgentMarker = ".clawdbot/disable-launchagent"
 
+    private static var disableLaunchAgentMarkerURL: URL {
+        FileManager().homeDirectoryForCurrentUser
+            .appendingPathComponent(self.disableLaunchAgentMarker)
+    }
+
     private static var plistURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
+        FileManager().homeDirectoryForCurrentUser
             .appendingPathComponent("Library/LaunchAgents/\(gatewayLaunchdLabel).plist")
+    }
+
+    static func isLaunchAgentWriteDisabled() -> Bool {
+        FileManager().fileExists(atPath: self.disableLaunchAgentMarkerURL.path)
+    }
+
+    static func setLaunchAgentWriteDisabled(_ disabled: Bool) -> String? {
+        let marker = self.disableLaunchAgentMarkerURL
+        if disabled {
+            do {
+                try FileManager().createDirectory(
+                    at: marker.deletingLastPathComponent(),
+                    withIntermediateDirectories: true)
+                if !FileManager().fileExists(atPath: marker.path) {
+                    FileManager().createFile(atPath: marker.path, contents: nil)
+                }
+            } catch {
+                return error.localizedDescription
+            }
+            return nil
+        }
+
+        if FileManager().fileExists(atPath: marker.path) {
+            do {
+                try FileManager().removeItem(at: marker)
+            } catch {
+                return error.localizedDescription
+            }
+        }
+        return nil
     }
 
     static func isLoaded() async -> Bool {
@@ -66,12 +101,6 @@ enum GatewayLaunchAgentManager {
 }
 
 extension GatewayLaunchAgentManager {
-    private static func isLaunchAgentWriteDisabled() -> Bool {
-        let marker = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(self.disableLaunchAgentMarker)
-        return FileManager.default.fileExists(atPath: marker.path)
-    }
-
     private static func readDaemonLoaded() async -> Bool? {
         let result = await self.runDaemonCommandResult(
             ["status", "--json", "--no-probe"],
@@ -115,7 +144,7 @@ extension GatewayLaunchAgentManager {
         quiet: Bool) async -> CommandResult
     {
         let command = CommandResolver.clawdbotCommand(
-            subcommand: "daemon",
+            subcommand: "gateway",
             extraArgs: self.withJsonFlag(args),
             // Launchd management must always run locally, even if remote mode is configured.
             configRoot: ["gateway": ["mode": "local"]])

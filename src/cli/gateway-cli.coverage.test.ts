@@ -118,7 +118,7 @@ describe("gateway-cli coverage", () => {
     expect(runtimeLogs.join("\n")).toContain('"ok": true');
   }, 30_000);
 
-  it("registers gateway status and routes to gatewayStatusCommand", async () => {
+  it("registers gateway probe and routes to gatewayStatusCommand", async () => {
     runtimeLogs.length = 0;
     runtimeErrors.length = 0;
     gatewayStatusCommand.mockClear();
@@ -128,7 +128,7 @@ describe("gateway-cli coverage", () => {
     program.exitOverride();
     registerGatewayCli(program);
 
-    await program.parseAsync(["gateway", "status", "--json"], { from: "user" });
+    await program.parseAsync(["gateway", "probe", "--json"], { from: "user" });
 
     expect(gatewayStatusCommand).toHaveBeenCalledTimes(1);
   }, 30_000);
@@ -249,7 +249,7 @@ describe("gateway-cli coverage", () => {
     programInvalidPort.exitOverride();
     registerGatewayCli(programInvalidPort);
     await expect(
-      programInvalidPort.parseAsync(["gateway", "--port", "0"], {
+      programInvalidPort.parseAsync(["gateway", "--port", "0", "--token", "test-token"], {
         from: "user",
       }),
     ).rejects.toThrow("__exit__:1");
@@ -263,7 +263,7 @@ describe("gateway-cli coverage", () => {
     registerGatewayCli(programForceFail);
     await expect(
       programForceFail.parseAsync(
-        ["gateway", "--port", "18789", "--force", "--allow-unconfigured"],
+        ["gateway", "--port", "18789", "--token", "test-token", "--force", "--allow-unconfigured"],
         { from: "user" },
       ),
     ).rejects.toThrow("__exit__:1");
@@ -276,9 +276,12 @@ describe("gateway-cli coverage", () => {
     const beforeSigterm = new Set(process.listeners("SIGTERM"));
     const beforeSigint = new Set(process.listeners("SIGINT"));
     await expect(
-      programStartFail.parseAsync(["gateway", "--port", "18789", "--allow-unconfigured"], {
-        from: "user",
-      }),
+      programStartFail.parseAsync(
+        ["gateway", "--port", "18789", "--token", "test-token", "--allow-unconfigured"],
+        {
+          from: "user",
+        },
+      ),
     ).rejects.toThrow("__exit__:1");
     for (const listener of process.listeners("SIGTERM")) {
       if (!beforeSigterm.has(listener)) process.removeListener("SIGTERM", listener);
@@ -304,14 +307,14 @@ describe("gateway-cli coverage", () => {
     registerGatewayCli(program);
 
     await expect(
-      program.parseAsync(["gateway", "--allow-unconfigured"], {
+      program.parseAsync(["gateway", "--token", "test-token", "--allow-unconfigured"], {
         from: "user",
       }),
     ).rejects.toThrow("__exit__:1");
 
     expect(startGatewayServer).toHaveBeenCalled();
     expect(runtimeErrors.join("\n")).toContain("Gateway failed to start:");
-    expect(runtimeErrors.join("\n")).toContain("clawdbot daemon stop");
+    expect(runtimeErrors.join("\n")).toContain("clawdbot gateway stop");
   });
 
   it("uses env/config port when --port is omitted", async () => {
@@ -327,7 +330,7 @@ describe("gateway-cli coverage", () => {
 
       startGatewayServer.mockRejectedValueOnce(new Error("nope"));
       await expect(
-        program.parseAsync(["gateway", "--allow-unconfigured"], {
+        program.parseAsync(["gateway", "--token", "test-token", "--allow-unconfigured"], {
           from: "user",
         }),
       ).rejects.toThrow("__exit__:1");

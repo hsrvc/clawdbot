@@ -12,6 +12,7 @@ import { resolveCommandAuthorization } from "../command-auth.js";
 import type { MsgContext } from "../templating.js";
 import { SILENT_REPLY_TOKEN } from "../tokens.js";
 import { applyMediaUnderstanding } from "../../media-understanding/apply.js";
+import { applyLinkUnderstanding } from "../../link-understanding/apply.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import { resolveDefaultModel } from "./directive-handling.js";
 import { resolveReplyDirectives } from "./get-reply-directives.js";
@@ -19,6 +20,7 @@ import { handleInlineActions } from "./get-reply-inline-actions.js";
 import { runPreparedReply } from "./get-reply-run.js";
 import { finalizeInboundContext } from "./inbound-context.js";
 import { initSessionState } from "./session.js";
+import { applyResetModelOverride } from "./session-reset-model.js";
 import { stageSandboxMedia } from "./stage-sandbox-media.js";
 import { createTypingController } from "./typing.js";
 
@@ -27,9 +29,13 @@ export async function getReplyFromConfig(
   opts?: GetReplyOptions,
   configOverride?: ClawdbotConfig,
 ): Promise<ReplyPayload | ReplyPayload[] | undefined> {
+  const isFastTestEnv = process.env.CLAWDBOT_TEST_FAST === "1";
   const cfg = configOverride ?? loadConfig();
+  const targetSessionKey =
+    ctx.CommandSource === "native" ? ctx.CommandTargetSessionKey?.trim() : undefined;
+  const agentSessionKey = targetSessionKey || ctx.SessionKey;
   const agentId = resolveSessionAgentId({
-    sessionKey: ctx.SessionKey,
+    sessionKey: agentSessionKey,
     config: cfg,
   });
   const agentCfg = cfg.agents?.defaults;
@@ -58,7 +64,7 @@ export async function getReplyFromConfig(
   const workspaceDirRaw = resolveAgentWorkspaceDir(cfg, agentId) ?? DEFAULT_AGENT_WORKSPACE_DIR;
   const workspace = await ensureAgentWorkspace({
     dir: workspaceDirRaw,
-    ensureBootstrapFiles: !agentCfg?.skipBootstrap,
+    ensureBootstrapFiles: !agentCfg?.skipBootstrap && !isFastTestEnv,
   });
   const workspaceDir = workspace.dir;
   const agentDir = resolveAgentDir(cfg, agentId);
@@ -77,12 +83,18 @@ export async function getReplyFromConfig(
 
   const finalized = finalizeInboundContext(ctx);
 
-  await applyMediaUnderstanding({
-    ctx: finalized,
-    cfg,
-    agentDir,
-    activeModel: { provider, model },
-  });
+  if (!isFastTestEnv) {
+    await applyMediaUnderstanding({
+      ctx: finalized,
+      cfg,
+      agentDir,
+      activeModel: { provider, model },
+    });
+    await applyLinkUnderstanding({
+      ctx: finalized,
+      cfg,
+    });
+  }
 
   const commandAuthorized = finalized.CommandAuthorized;
   resolveCommandAuthorization({
@@ -103,6 +115,7 @@ export async function getReplyFromConfig(
     sessionKey,
     sessionId,
     isNewSession,
+    resetTriggered,
     systemSent,
     abortedLastRun,
     storePath,
@@ -110,7 +123,23 @@ export async function getReplyFromConfig(
     groupResolution,
     isGroup,
     triggerBodyNormalized,
+    bodyStripped,
   } = sessionState;
+
+  await applyResetModelOverride({
+    cfg,
+    resetTriggered,
+    bodyStripped,
+    sessionCtx,
+    ctx: finalized,
+    sessionEntry,
+    sessionStore,
+    sessionKey,
+    storePath,
+    defaultProvider,
+    defaultModel,
+    aliasIndex,
+  });
 
   const directiveResult = await resolveReplyDirectives({
     ctx: finalized,
@@ -178,6 +207,7 @@ export async function getReplyFromConfig(
     sessionCtx,
     cfg,
     agentId,
+    agentDir,
     sessionEntry,
     previousSessionEntry,
     sessionStore,
@@ -255,9 +285,11 @@ export async function getReplyFromConfig(
     perMessageQueueOptions,
     typing,
     opts,
+    defaultProvider,
     defaultModel,
     timeoutMs,
     isNewSession,
+    resetTriggered,
     systemSent,
     sessionEntry,
     sessionStore,
