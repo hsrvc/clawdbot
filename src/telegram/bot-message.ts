@@ -79,7 +79,10 @@ export const createTelegramMessageProcessor = (deps) => {
       resolveGroupRequireMention,
       resolveTelegramGroupConfig,
     });
-    if (!context) return;
+    if (!context) {
+      logger?.(`[DEBUG] buildTelegramMessageContext returned null, skipping message`);
+      return;
+    }
     await dispatchTelegramMessage({
       context,
       bot,
